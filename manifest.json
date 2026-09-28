@@ -1,0 +1,9 @@
+{
+  "id": "para-swipe",
+  "name": "Paragraph Swipe",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Swipe right on a paragraph to move it to the end of another note. A compact picker window with fuzzy search. Built for touch screens.",
+  "author": "oleg",
+  "isDesktopOnly": false
+}
