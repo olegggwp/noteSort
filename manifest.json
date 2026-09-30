@@ -1,10 +1,10 @@
 {
-    "id": "paragraph-swipe",
+    "id": "para-swipe",
     "name": "Paragraph Swipe",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "minAppVersion": "1.4.0",
-    "description": "Swipe right over a paragraph to move it to the end of another note.",
-    "author": "Your Name",
+    "description": "Swipe right over a paragraph to move it to another note.",
+    "author": "AlinaCortex",
     "authorUrl": "",
     "isDesktopOnly": false
 }
