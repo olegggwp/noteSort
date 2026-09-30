@@ -1,0 +1,20 @@
+/* Paragraph Swipe */
+
+.modal.paragraph-swipe-modal {
+    width: min(520px, calc(100vw - 32px));
+}
+
+.paragraph-swipe-suggestion-title {
+    font-weight: 600;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.paragraph-swipe-suggestion-details {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}

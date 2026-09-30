@@ -1,0 +1,25 @@
+{
+    "compilerOptions": {
+        "baseUrl": ".",
+        "target": "ES2018",
+        "module": "ESNext",
+        "moduleResolution": "node",
+        "lib": ["DOM", "DOM.Iterable", "ES2018", "ES2019", "ES2020", "ES2021"],
+        "strict": true,
+        "noImplicitAny": true,
+        "strictNullChecks": true,
+        "noImplicitThis": true,
+        "noImplicitReturns": true,
+        "noFallthroughCasesInSwitch": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "forceConsistentCasingInFileNames": true,
+        "esModuleInterop": true,
+        "isolatedModules": true,
+        "importHelpers": true,
+        "inlineSourceMap": true,
+        "inlineSources": true,
+        "skipLibCheck": true
+    },
+    "include": ["src/**/*.ts"]
+}
