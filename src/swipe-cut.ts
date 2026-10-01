@@ -1,8 +1,7 @@
 import { MarkdownView } from "obsidian";
 
-import { posAtClientPoint } from "./editor-position";
 import type { ParagraphRange } from "./lib/paragraph";
-import { readElement, readNumber, readProperty } from "./lib/runtime-probe";
+import { readElement, readProperty, safely } from "./lib/runtime-probe";
 
 /**
  * Swipe feedback: the paragraph under the finger looks cut out of the note
@@ -58,9 +57,6 @@ const PROGRESS_PROPERTY = "--paragraph-swipe-progress";
 const RELEASE_MS = 180;
 const DETACH_MS = 220;
 
-/** Distance from a box edge at which a line is probed for its document position. */
-const PROBE_INSET_PX = 2;
-
 /** A rectangle in viewport coordinates, in CSS pixels. */
 interface SwipeRect {
     readonly top: number;
@@ -70,7 +66,7 @@ interface SwipeRect {
 }
 
 /** Why a paragraph could not be turned into a travelling block. */
-type LocateFailure = "no-lines" | "no-position" | "not-rendered" | "no-box" | "off-screen";
+type LocateFailure = "no-lines" | "no-line-under-finger" | "no-box";
 
 /** The result of trying to cut a paragraph out: the effect, or the reason. */
 export type CutResult = { readonly cut: SwipeCut; readonly reason: null } | { readonly cut: null; readonly reason: LocateFailure };
@@ -95,67 +91,59 @@ function editorRoot(view: MarkdownView): HTMLElement {
     return content instanceof HTMLElement ? content : view.contentEl;
 }
 
-/** The rendered `.cm-line` elements of the editor, in document order. */
-function renderedLines(view: MarkdownView): readonly HTMLElement[] | null {
-    const container = view.contentEl.querySelector(".cm-content");
-    if (!(container instanceof HTMLElement)) {
-        return null;
-    }
-    const lines = Array.from(container.querySelectorAll<HTMLElement>(".cm-line"));
-    return lines.length > 0 ? lines : null;
-}
-
 /**
- * The document line number of the editor's first *rendered* line: everything
- * before it is virtualised away, so the rendered lines are document lines
- * `firstRenderedLine .. firstRenderedLine + lines.length - 1`.
+ * The index, in the rendered lines, of the line the finger is on — or -1 when
+ * the finger is not over rendered text (a gap between lines, a widget, the
+ * gutter).
  */
-function firstRenderedLine(view: MarkdownView, lines: readonly HTMLElement[]): number | null {
-    const fromViewport = readNumber(view.editor, "getFirstVisibleLine");
-    if (fromViewport !== null) {
-        return fromViewport;
+function lineIndexAtPoint(lines: readonly HTMLElement[], x: number, y: number): number {
+    const element = safely(() => document.elementFromPoint(x, y));
+    const line = element instanceof Element ? element.closest(".cm-line") : null;
+    if (!(line instanceof HTMLElement)) {
+        return -1;
     }
-    // Without it, resolve the first rendered element through the same
-    // multi-strategy resolver the picker uses.
-    const first = lines[0];
-    if (first === undefined) {
-        return null;
-    }
-    const rect = first.getBoundingClientRect();
-    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom) || rect.bottom <= rect.top) {
-        return null;
-    }
-    // Probed inside the element, on the side of it that is guaranteed to be on
-    // screen: the first rendered line is usually clipped by the top edge.
-    const y = rect.top < 0 ? rect.bottom - PROBE_INSET_PX : rect.top + PROBE_INSET_PX;
-    return posAtClientPoint(view.editor, rect.left + PROBE_INSET_PX, y)?.position.line ?? null;
+    const index = lines.indexOf(line);
+    return index < 0 ? -1 : index;
 }
 
 /**
  * The rendered lines of a paragraph, or the reason they cannot be found.
  *
  * One CodeMirror document line is exactly one `.cm-line` element (text that
- * wraps lives inside its own element), so the rendered lines are in document
- * order and the paragraph is a slice of them — no position-to-element mapping
- * needed. Only the paragraph's first line has to be located, through the same
- * `posAtCoords` the picker uses; everything else is counting. Lines the
- * virtualised viewport does not render end the block: what is off screen
- * cannot be seen moving anyway.
+ * wraps lives inside its own element), and the rendered ones are in document
+ * order, so the paragraph is a slice of them — the only thing that has to be
+ * found is where that slice starts.
+ *
+ * The finger is already on the paragraph, and its document line is known, so
+ * the slice is counted backwards from the line under the finger. Counting is
+ * what makes this work deep inside a long note: CodeMirror only renders the
+ * neighbourhood of the viewport there, and everything before it simply is not in
+ * the DOM, which no arithmetic about the first rendered line can account for.
+ * A paragraph reaching outside the rendered part is cut down to the part that
+ * is really there — off screen nobody could see it move anyway.
  */
-function paragraphLines(view: MarkdownView, range: ParagraphRange): readonly HTMLElement[] | LocateFailure {
-    const lines = renderedLines(view);
-    if (lines === null) {
+function paragraphLines(
+    view: MarkdownView,
+    range: ParagraphRange,
+    fingerLine: number,
+    probeX: number,
+    probeY: number,
+): readonly HTMLElement[] | LocateFailure {
+    const container = view.contentEl.querySelector(".cm-content");
+    if (!(container instanceof HTMLElement)) {
         return "no-lines";
     }
-    const firstRendered = firstRenderedLine(view, lines);
-    if (firstRendered === null) {
-        return "no-position";
+    const lines = Array.from(container.querySelectorAll<HTMLElement>(".cm-line"));
+    if (lines.length === 0) {
+        return "no-lines";
     }
-    const from = range.start - firstRendered;
-    if (from < 0 || from >= lines.length) {
-        return "not-rendered";
+    const fingerIndex = lineIndexAtPoint(lines, probeX, probeY);
+    if (fingerIndex < 0) {
+        return "no-line-under-finger";
     }
-    return lines.slice(from, Math.min(from + (range.end - range.start), lines.length));
+    const count = range.end - range.start;
+    const from = Math.max(0, fingerIndex - (fingerLine - range.start));
+    return lines.slice(from, Math.min(from + count, lines.length));
 }
 
 /**
@@ -229,8 +217,14 @@ export class SwipeCut {
      * none — the caller logs it, because on a phone there is no other way to
      * see why the effect did not come up.
      */
-    public static attach(view: MarkdownView, range: ParagraphRange): CutResult {
-        const located = paragraphLines(view, range);
+    public static attach(
+        view: MarkdownView,
+        range: ParagraphRange,
+        fingerLine: number,
+        probeX: number,
+        probeY: number,
+    ): CutResult {
+        const located = paragraphLines(view, range, fingerLine, probeX, probeY);
         if (typeof located === "string") {
             return { cut: null, reason: located };
         }

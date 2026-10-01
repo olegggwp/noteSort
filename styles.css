@@ -52,8 +52,11 @@
     visibility: hidden;
 }
 
-/* The slot the paragraph was cut from. */
+/* The slot the paragraph was cut from. Only the two horizontal edges are
+   dashed: the vertical ones would read as the sides of a card, not as a gap. */
 .paragraph-swipe-slot {
+    --paragraph-swipe-dash: rgba(94, 160, 255, 0.6);
+    --paragraph-swipe-dash: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 60%, transparent);
     position: fixed;
     z-index: var(--layer-popover, 30);
     box-sizing: border-box;
@@ -61,9 +64,24 @@
     border-radius: var(--radius-m, 8px);
     background: rgba(94, 160, 255, 0.08);
     background: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 10%, transparent);
-    outline: 1px dashed rgba(94, 160, 255, 0.5);
-    outline-offset: -1px;
-    outline-color: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 60%, transparent);
+}
+
+.paragraph-swipe-slot::before,
+.paragraph-swipe-slot::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    height: 0;
+    border-top: 1px dashed var(--paragraph-swipe-dash);
+}
+
+.paragraph-swipe-slot::before {
+    top: 0;
+}
+
+.paragraph-swipe-slot::after {
+    bottom: 0;
 }
 
 /* The glowing plate that rides with the block. */

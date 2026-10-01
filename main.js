@@ -487,7 +487,6 @@ var SHIFT_PROPERTY = "--paragraph-swipe-shift";
 var PROGRESS_PROPERTY = "--paragraph-swipe-progress";
 var RELEASE_MS = 180;
 var DETACH_MS = 220;
-var PROBE_INSET_PX = 2;
 function clampProgress(value) {
   if (!Number.isFinite(value)) {
     return 0;
@@ -505,45 +504,31 @@ function editorRoot(view) {
   const content = view.contentEl.querySelector(".cm-content");
   return content instanceof HTMLElement ? content : view.contentEl;
 }
-function renderedLines(view) {
+function lineIndexAtPoint(lines, x, y) {
+  const element = safely(() => document.elementFromPoint(x, y));
+  const line = element instanceof Element ? element.closest(".cm-line") : null;
+  if (!(line instanceof HTMLElement)) {
+    return -1;
+  }
+  const index = lines.indexOf(line);
+  return index < 0 ? -1 : index;
+}
+function paragraphLines(view, range, fingerLine, probeX, probeY) {
   const container = view.contentEl.querySelector(".cm-content");
   if (!(container instanceof HTMLElement)) {
-    return null;
-  }
-  const lines = Array.from(container.querySelectorAll(".cm-line"));
-  return lines.length > 0 ? lines : null;
-}
-function firstRenderedLine(view, lines) {
-  var _a, _b;
-  const fromViewport = readNumber(view.editor, "getFirstVisibleLine");
-  if (fromViewport !== null) {
-    return fromViewport;
-  }
-  const first = lines[0];
-  if (first === void 0) {
-    return null;
-  }
-  const rect = first.getBoundingClientRect();
-  if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom) || rect.bottom <= rect.top) {
-    return null;
-  }
-  const y = rect.top < 0 ? rect.bottom - PROBE_INSET_PX : rect.top + PROBE_INSET_PX;
-  return (_b = (_a = posAtClientPoint(view.editor, rect.left + PROBE_INSET_PX, y)) == null ? void 0 : _a.position.line) != null ? _b : null;
-}
-function paragraphLines(view, range) {
-  const lines = renderedLines(view);
-  if (lines === null) {
     return "no-lines";
   }
-  const firstRendered = firstRenderedLine(view, lines);
-  if (firstRendered === null) {
-    return "no-position";
+  const lines = Array.from(container.querySelectorAll(".cm-line"));
+  if (lines.length === 0) {
+    return "no-lines";
   }
-  const from = range.start - firstRendered;
-  if (from < 0 || from >= lines.length) {
-    return "not-rendered";
+  const fingerIndex = lineIndexAtPoint(lines, probeX, probeY);
+  if (fingerIndex < 0) {
+    return "no-line-under-finger";
   }
-  return lines.slice(from, Math.min(from + (range.end - range.start), lines.length));
+  const count = range.end - range.start;
+  const from = Math.max(0, fingerIndex - (fingerLine - range.start));
+  return lines.slice(from, Math.min(from + count, lines.length));
 }
 function unionRect(elements) {
   let top = Number.POSITIVE_INFINITY;
@@ -592,8 +577,8 @@ var SwipeCut = class _SwipeCut {
    * none — the caller logs it, because on a phone there is no other way to
    * see why the effect did not come up.
    */
-  static attach(view, range) {
-    const located = paragraphLines(view, range);
+  static attach(view, range, fingerLine, probeX, probeY) {
+    const located = paragraphLines(view, range, fingerLine, probeX, probeY);
     if (typeof located === "string") {
       return { cut: null, reason: located };
     }
@@ -1032,7 +1017,13 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       return;
     }
     gesture.paragraph = lookup;
-    const { cut, reason } = SwipeCut.attach(gesture.view, lookup.range);
+    const { cut, reason } = SwipeCut.attach(
+      gesture.view,
+      lookup.range,
+      lookup.line,
+      gesture.startX,
+      gesture.startY
+    );
     if (cut === null) {
       this.debugLog(
         `the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end} cannot be cut out (${reason})`
@@ -1122,7 +1113,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     if (range === null) {
       return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
     }
-    return { kind: "paragraph", range, strategy: resolved.strategy };
+    return { kind: "paragraph", range, line: resolved.position.line, strategy: resolved.strategy };
   }
   /**
    * The paragraph this gesture is about: the one the cut effect resolved, or
@@ -1132,7 +1123,12 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     if (gesture.paragraph === null) {
       return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
     }
-    return { kind: "paragraph", range: gesture.paragraph.range, strategy: gesture.paragraph.strategy };
+    return {
+      kind: "paragraph",
+      range: gesture.paragraph.range,
+      line: gesture.paragraph.line,
+      strategy: gesture.paragraph.strategy
+    };
   }
   /** Opens the note picker for the paragraph this gesture started on. */
   triggerSwipe(gesture) {

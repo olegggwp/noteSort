@@ -28,6 +28,8 @@ function describeElement(element: Element): string {
 /** A paragraph found under a viewport point, and how it was found. */
 interface ResolvedParagraph {
     readonly range: ParagraphRange;
+    /** The document line under the finger, i.e. where inside the paragraph it is. */
+    readonly line: number;
     readonly strategy: string;
 }
 
@@ -494,7 +496,13 @@ export default class ParagraphSwipePlugin extends Plugin {
         // Remembered for the picker: the lines are about to move out from under
         // the start coordinates.
         gesture.paragraph = lookup;
-        const { cut, reason } = SwipeCut.attach(gesture.view, lookup.range);
+        const { cut, reason } = SwipeCut.attach(
+            gesture.view,
+            lookup.range,
+            lookup.line,
+            gesture.startX,
+            gesture.startY,
+        );
         if (cut === null) {
             this.debugLog(
                 `the paragraph on lines ${lookup.range.start + 1}–${lookup.range.end} cannot be cut out (${reason})`,
@@ -591,7 +599,7 @@ export default class ParagraphSwipePlugin extends Plugin {
         if (range === null) {
             return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
         }
-        return { kind: "paragraph", range, strategy: resolved.strategy };
+        return { kind: "paragraph", range, line: resolved.position.line, strategy: resolved.strategy };
     }
 
     /**
@@ -602,7 +610,12 @@ export default class ParagraphSwipePlugin extends Plugin {
         if (gesture.paragraph === null) {
             return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
         }
-        return { kind: "paragraph", range: gesture.paragraph.range, strategy: gesture.paragraph.strategy };
+        return {
+            kind: "paragraph",
+            range: gesture.paragraph.range,
+            line: gesture.paragraph.line,
+            strategy: gesture.paragraph.strategy,
+        };
     }
 
     /** Opens the note picker for the paragraph this gesture started on. */
