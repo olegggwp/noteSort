@@ -9,15 +9,20 @@ export const MIN_VERTICAL_TOLERANCE_PX = 24;
  * Total travel (in px) after which the gesture direction is decided:
  * horizontal-dominant movement is claimed by the plugin, vertical-dominant
  * movement is released back to the app for scrolling.
+ *
+ * This has to stay small: the claim is what calls preventDefault(), and
+ * Obsidian's own swipe-to-open-the-drawer gesture wins as soon as the plugin
+ * lets a touchmove pass through. On a phone screen a swipe of this size is
+ * over before the drawer has even started to open.
  */
-export const DECISION_DISTANCE_PX = 200;
+export const DECISION_DISTANCE_PX = 10;
 
 /**
- * Horizontal travel (in px) at which the swipe feedback lights up. Well below
- * DECISION_DISTANCE_PX: the glow has to appear while the finger is still
- * starting to move, not after the gesture is already claimed.
+ * Width (in px) of the strip along the left edge in which Obsidian's drawer
+ * gesture lives. Nothing else uses that strip, so a rightward drag started
+ * there can be claimed at once instead of after DECISION_DISTANCE_PX.
  */
-export const INTENT_DISTANCE_PX = 6;
+export const DRAWER_EDGE_ZONE_PX = 32;
 
 export type GestureDecision = "rightward" | "leftward" | "vertical" | "undecided";
 
@@ -26,16 +31,28 @@ export function verticalTolerancePx(swipeThresholdPx: number): number {
 }
 
 /**
- * True as soon as the finger clearly travels right rather than down. Weaker
- * than `decideGesture` (less distance, no commitment): it answers "is a swipe
- * starting?" for the visual feedback, not "is this gesture ours yet?".
+ * True as soon as the finger travels right at all, without waiting for a
+ * direction to emerge. Weaker than `decideGesture` on purpose: it answers "is a
+ * swipe starting?" for the visual feedback, which has to be there while the
+ * finger is still moving, not once the gesture is already claimed. A gesture
+ * that turns out to be a scroll is dropped by the caller anyway.
  */
-export function isRightwardIntent(deltaX: number, deltaY: number): boolean {
-    return deltaX >= INTENT_DISTANCE_PX && deltaX > Math.abs(deltaY);
-}
-
 export function isCRAZYIntent(deltaX: number): boolean {
     return deltaX >= 1;
+}
+
+/** True when a touch started inside the left edge strip of the drawer gesture. */
+export function isDrawerZoneStart(startX: number): boolean {
+    return Number.isFinite(startX) && startX <= DRAWER_EDGE_ZONE_PX;
+}
+
+/**
+ * How far the finger has to travel before this gesture's direction may be
+ * decided: the usual distance, or the first pixel in the drawer zone, where a
+ * rightward drag can only be the drawer gesture that has to be beaten.
+ */
+export function decisionDistancePx(startX: number): number {
+    return isDrawerZoneStart(startX) ? 1 : DECISION_DISTANCE_PX;
 }
 
 
@@ -65,15 +82,15 @@ export function isRightwardSwipe(deltaX: number, deltaY: number, swipeThresholdP
 
 /**
  * Classifies the gesture from its accumulated deltas. Before the total travel
- * reaches DECISION_DISTANCE_PX the direction is "undecided". After that the
- * dominant axis wins: vertical-dominant gestures are scrolls (released to the
- * app), horizontal gestures are swipes — rightward ones are claimed, leftward
- * ones are released untouched.
+ * reaches `decisionDistancePx` (DECISION_DISTANCE_PX by default) the direction
+ * is "undecided". After that the dominant axis wins: vertical-dominant gestures
+ * are scrolls (released to the app), horizontal gestures are swipes — rightward
+ * ones are claimed, leftward ones are released untouched.
  */
-export function decideGesture(deltaX: number, deltaY: number): GestureDecision {
+export function decideGesture(deltaX: number, deltaY: number, decisionDistancePxValue = DECISION_DISTANCE_PX): GestureDecision {
     const absoluteX = Math.abs(deltaX);
     const absoluteY = Math.abs(deltaY);
-    if (Math.max(absoluteX, absoluteY) < DECISION_DISTANCE_PX) {
+    if (Math.max(absoluteX, absoluteY) < decisionDistancePxValue) {
         return "undecided";
     }
     if (absoluteY > absoluteX) {

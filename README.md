@@ -13,9 +13,11 @@ Made for **Android** (touch screen, no keyboard).
 
 Swipe right on paragraph that you want to send to another file. Choose destination. Done.
 
-While the finger travels, the paragraph you are moving lights up: a glowing band
-over it, glowing brighter the closer you are to the threshold. Release before the
-threshold and the band fades away without doing anything.
+While the finger travels, the paragraph you are moving is cut out of the note and
+carried to the right together with your finger, leaving a dashed slot behind. It
+glows brighter the closer you are to the threshold. Reach the threshold and it flies
+off to the right; let go earlier and it slides back into its slot without doing
+anything.
 
 Everything is intuitive.
 

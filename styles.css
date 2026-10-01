@@ -20,14 +20,54 @@
 }
 
 /*
- * The glowing band over the paragraph a rightward swipe is about to move.
- * Positioned by src/swipe-glow.ts; `--paragraph-swipe-progress` (0..1, the
- * swipe's share of the threshold) makes the glow build up with the finger.
- * Every visual is declared twice: a plain rgba fallback, then the
- * theme-aware color-mix version that engines without color-mix() ignore.
+ * The cut-out swipe effect (src/swipe-cut.ts).
+ *
+ * The paragraph is carried away by translating its own `.cm-line` elements, so
+ * the document really does end up with a hole where the text used to be.
+ * `--paragraph-swipe-shift` (the finger's horizontal travel) and
+ * `--paragraph-swipe-progress` (0..1, its share of the threshold) are written
+ * on the editor root by the plugin; the plate repeats them because it lives
+ * outside the editor.
+ *
+ * Every colour is declared twice: a plain rgba fallback, then the theme-aware
+ * color-mix version that engines without color-mix() ignore.
  */
 
-.paragraph-swipe-glow {
+/* While a block travels, the scroll container must not become scrollable
+   sideways because of the translation (CodeMirror sets `overflow-x: auto`). */
+.paragraph-swipe-carrier.cm-scroller {
+    overflow-x: hidden;
+}
+
+/* The lines of the swiped paragraph: this is the movement itself. */
+.paragraph-swipe-line {
+    transform: translateX(var(--paragraph-swipe-shift, 0px));
+    will-change: transform;
+}
+
+/* The caret would stay behind at the old position while the text travels. */
+.paragraph-swipe-active .cm-cursor,
+.paragraph-swipe-active .cm-dropCursor,
+.paragraph-swipe-active .cm-fatCursor {
+    visibility: hidden;
+}
+
+/* The slot the paragraph was cut from. */
+.paragraph-swipe-slot {
+    position: fixed;
+    z-index: var(--layer-popover, 30);
+    box-sizing: border-box;
+    pointer-events: none;
+    border-radius: var(--radius-m, 8px);
+    background: rgba(94, 160, 255, 0.08);
+    background: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 10%, transparent);
+    outline: 1px dashed rgba(94, 160, 255, 0.5);
+    outline-offset: -1px;
+    outline-color: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 60%, transparent);
+}
+
+/* The glowing plate that rides with the block. */
+.paragraph-swipe-plate {
     --paragraph-swipe-progress: 0;
     --paragraph-swipe-edge: calc(3px + 5px * var(--paragraph-swipe-progress));
     --paragraph-swipe-blur: calc(10px + 16px * var(--paragraph-swipe-progress));
@@ -37,7 +77,8 @@
     pointer-events: none;
     border-radius: var(--radius-m, 8px);
     opacity: calc(0.38 + 0.62 * var(--paragraph-swipe-progress));
-    transition: opacity 90ms linear;
+    transform: translateX(var(--paragraph-swipe-shift, 0px));
+    will-change: transform, opacity;
     background: linear-gradient(90deg, rgba(94, 160, 255, 0.38), rgba(94, 160, 255, 0.1) 62%, rgba(94, 160, 255, 0));
     background: linear-gradient(
         90deg,
@@ -63,21 +104,30 @@
             color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
         0 0 calc(6px + 10px * var(--paragraph-swipe-progress))
             color-mix(in srgb, var(--interactive-accent, #5ea0ff) 50%, transparent);
-    animation: paragraph-swipe-bloom 160ms ease-out;
 }
 
-/* The end of a swipe: the glow dies out instead of blinking away. */
-.paragraph-swipe-glow.paragraph-swipe-glow--out {
+/* The swipe was abandoned: the block slides back into the slot it came from. */
+.paragraph-swipe-plate--out {
     opacity: 0;
-    transition: opacity 220ms ease-out;
+    transform: translateX(0);
+    transition:
+        transform 160ms ease-out,
+        opacity 160ms ease-out;
 }
 
-@keyframes paragraph-swipe-bloom {
+/* The block was accepted: it leaves the note for good. */
+.paragraph-swipe-plate--detached {
+    animation: paragraph-swipe-detach 200ms ease-in forwards;
+}
+
+@keyframes paragraph-swipe-detach {
     from {
-        transform: scale(0.97);
+        transform: translateX(var(--paragraph-swipe-shift, 0px));
+        opacity: 1;
     }
 
     to {
-        transform: scale(1);
+        transform: translateX(calc(var(--paragraph-swipe-shift, 0px) + 60px));
+        opacity: 0;
     }
 }

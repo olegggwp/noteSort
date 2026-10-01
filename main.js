@@ -216,12 +216,19 @@ function isEditorEditable(editor) {
 
 // src/lib/gesture.ts
 var MIN_VERTICAL_TOLERANCE_PX = 24;
-var DECISION_DISTANCE_PX = 12;
+var DECISION_DISTANCE_PX = 10;
+var DRAWER_EDGE_ZONE_PX = 32;
 function verticalTolerancePx(swipeThresholdPx) {
   return Math.max(MIN_VERTICAL_TOLERANCE_PX, Math.round(swipeThresholdPx / 2));
 }
 function isCRAZYIntent(deltaX) {
   return deltaX >= 1;
+}
+function isDrawerZoneStart(startX) {
+  return Number.isFinite(startX) && startX <= DRAWER_EDGE_ZONE_PX;
+}
+function decisionDistancePx(startX) {
+  return isDrawerZoneStart(startX) ? 1 : DECISION_DISTANCE_PX;
 }
 function swipeProgress(deltaX, swipeThresholdPx) {
   if (!Number.isFinite(deltaX) || deltaX <= 0) {
@@ -236,10 +243,10 @@ function isRightwardSwipe(deltaX, deltaY, swipeThresholdPx) {
   }
   return Math.abs(deltaY) <= verticalTolerancePx(swipeThresholdPx);
 }
-function decideGesture(deltaX, deltaY) {
+function decideGesture(deltaX, deltaY, decisionDistancePxValue = DECISION_DISTANCE_PX) {
   const absoluteX = Math.abs(deltaX);
   const absoluteY = Math.abs(deltaY);
-  if (Math.max(absoluteX, absoluteY) < DECISION_DISTANCE_PX) {
+  if (Math.max(absoluteX, absoluteY) < decisionDistancePxValue) {
     return "undecided";
   }
   if (absoluteY > absoluteX) {
@@ -468,186 +475,230 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
   }
 };
 
-// src/swipe-glow.ts
-var GLOW_CLASS = "paragraph-swipe-glow";
-var FADE_OUT_CLASS = "paragraph-swipe-glow--out";
-var FADE_OUT_MS = 240;
+// src/swipe-cut.ts
+var ACTIVE_CLASS = "paragraph-swipe-active";
+var CARRIER_CLASS = "paragraph-swipe-carrier";
+var LINE_CLASS = "paragraph-swipe-line";
+var SLOT_CLASS = "paragraph-swipe-slot";
+var PLATE_CLASS = "paragraph-swipe-plate";
+var PLATE_OUT_CLASS = "paragraph-swipe-plate--out";
+var PLATE_DETACHED_CLASS = "paragraph-swipe-plate--detached";
+var SHIFT_PROPERTY = "--paragraph-swipe-shift";
 var PROGRESS_PROPERTY = "--paragraph-swipe-progress";
-var PROGRESS_EPSILON = 0.01;
+var RELEASE_MS = 180;
+var DETACH_MS = 220;
+var PROBE_INSET_PX = 2;
 function clampProgress(value) {
   if (!Number.isFinite(value)) {
     return 0;
   }
   return Math.min(1, Math.max(0, value));
 }
-function asLineBounds(value) {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const record = value;
-  const top = record["top"];
-  const bottom = record["bottom"];
-  if (typeof top !== "number" || !Number.isFinite(top)) {
-    return null;
-  }
-  if (typeof bottom !== "number" || !Number.isFinite(bottom)) {
-    return null;
-  }
-  return { top, bottom };
-}
-function lineBoundsAtPos(editor, pos) {
-  const coordsAtPos = readFunction(editor, "coordsAtPos");
-  if (coordsAtPos === null) {
-    return null;
-  }
-  return safely(() => asLineBounds(coordsAtPos.call(editor, pos)));
-}
-function codeMirrorView(editor) {
-  const cm = readProperty(editor, "cm");
-  return typeof cm === "object" && cm !== null ? cm : null;
-}
-function horizontalPadding(element) {
-  const style = window.getComputedStyle(element);
-  const left = Number.parseFloat(style.paddingLeft);
-  const right = Number.parseFloat(style.paddingRight);
-  return {
-    left: Number.isFinite(left) ? left : 0,
-    right: Number.isFinite(right) ? right : 0
-  };
-}
-function textColumn(view) {
-  const editor = view.editor;
-  const cm = codeMirrorView(editor);
-  const candidates = [
-    readElement(editor, "scrollEl"),
-    readElement(editor, "containerEl"),
-    cm === null ? null : readElement(cm, "scroller"),
-    cm === null ? null : readElement(cm, "contentEl"),
-    view.contentEl
-  ];
-  for (const element of candidates) {
-    if (element === null) {
-      continue;
+function editorRoot(view) {
+  const cm = readProperty(view.editor, "cm");
+  if (typeof cm === "object" && cm !== null) {
+    const dom = readElement(cm, "dom");
+    if (dom !== null) {
+      return dom;
     }
+  }
+  const content = view.contentEl.querySelector(".cm-content");
+  return content instanceof HTMLElement ? content : view.contentEl;
+}
+function renderedLines(view) {
+  const container = view.contentEl.querySelector(".cm-content");
+  if (!(container instanceof HTMLElement)) {
+    return null;
+  }
+  const lines = Array.from(container.querySelectorAll(".cm-line"));
+  return lines.length > 0 ? lines : null;
+}
+function firstRenderedLine(view, lines) {
+  var _a, _b;
+  const fromViewport = readNumber(view.editor, "getFirstVisibleLine");
+  if (fromViewport !== null) {
+    return fromViewport;
+  }
+  const first = lines[0];
+  if (first === void 0) {
+    return null;
+  }
+  const rect = first.getBoundingClientRect();
+  if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom) || rect.bottom <= rect.top) {
+    return null;
+  }
+  const y = rect.top < 0 ? rect.bottom - PROBE_INSET_PX : rect.top + PROBE_INSET_PX;
+  return (_b = (_a = posAtClientPoint(view.editor, rect.left + PROBE_INSET_PX, y)) == null ? void 0 : _a.position.line) != null ? _b : null;
+}
+function paragraphLines(view, range) {
+  const lines = renderedLines(view);
+  if (lines === null) {
+    return "no-lines";
+  }
+  const firstRendered = firstRenderedLine(view, lines);
+  if (firstRendered === null) {
+    return "no-position";
+  }
+  const from = range.start - firstRendered;
+  if (from < 0 || from >= lines.length) {
+    return "not-rendered";
+  }
+  return lines.slice(from, Math.min(from + (range.end - range.start), lines.length));
+}
+function unionRect(elements) {
+  let top = Number.POSITIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  let left = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  for (const element of elements) {
     const rect = element.getBoundingClientRect();
-    if (!Number.isFinite(rect.left) || !Number.isFinite(rect.right) || rect.width <= 0) {
-      continue;
-    }
-    const padding = horizontalPadding(element);
-    const left = rect.left + padding.left;
-    const right = rect.right - padding.right;
-    if (right > left) {
-      return { left, right };
-    }
-  }
-  return null;
-}
-function paragraphGlowBounds(view, range) {
-  var _a;
-  const editor = view.editor;
-  const first = lineBoundsAtPos(editor, { line: range.start, ch: 0 });
-  if (first === null) {
-    return null;
-  }
-  const lastLine = Math.min(range.end - 1, Math.max(editor.lineCount() - 1, 0));
-  const lastText = (_a = editor.getLine(lastLine)) != null ? _a : "";
-  const last = lineBoundsAtPos(editor, { line: lastLine, ch: Math.max(lastText.length - 1, 0) });
-  if (last === null) {
-    return null;
-  }
-  const viewportHeight = window.innerHeight;
-  const viewportWidth = window.innerWidth;
-  const top = Math.max(first.top, 0);
-  const bottom = Math.min(last.bottom, viewportHeight);
-  if (bottom <= top) {
-    return null;
-  }
-  const column = textColumn(view);
-  const left = column === null ? 0 : Math.max(column.left, 0);
-  const right = column === null ? viewportWidth : Math.min(column.right, viewportWidth);
-  if (right <= left) {
-    return null;
-  }
-  return { top, bottom, left, right };
-}
-var SwipeGlow = class _SwipeGlow {
-  constructor(element) {
-    this.lastProgress = -1;
-    this.element = element;
-  }
-  /** Lays a glow over `range`, or returns null if the paragraph is unmeasurable. */
-  static attach(view, range) {
-    const bounds = paragraphGlowBounds(view, range);
-    if (bounds === null) {
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) {
       return null;
     }
-    const element = document.createElement("div");
-    element.className = GLOW_CLASS;
-    element.style.top = `${Math.round(bounds.top)}px`;
-    element.style.height = `${Math.round(bounds.bottom - bounds.top)}px`;
-    element.style.left = `${Math.round(bounds.left)}px`;
-    element.style.width = `${Math.round(bounds.right - bounds.left)}px`;
-    document.body.appendChild(element);
-    return new _SwipeGlow(element);
+    top = Math.min(top, rect.top);
+    bottom = Math.max(bottom, rect.bottom);
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+  }
+  const visibleTop = Math.max(top, 0);
+  const visibleBottom = Math.min(bottom, window.innerHeight);
+  if (visibleBottom <= visibleTop || right <= left) {
+    return null;
+  }
+  return { top: visibleTop, bottom: visibleBottom, left, right };
+}
+function appendOverlay(cls, rect) {
+  const element = document.createElement("div");
+  element.className = cls;
+  element.style.top = `${Math.round(rect.top)}px`;
+  element.style.left = `${Math.round(rect.left)}px`;
+  element.style.width = `${Math.round(rect.right - rect.left)}px`;
+  element.style.height = `${Math.round(rect.bottom - rect.top)}px`;
+  document.body.appendChild(element);
+  return element;
+}
+var SwipeCut = class _SwipeCut {
+  constructor(lines, root, scroller, slot, plate) {
+    this.lastProgress = -1;
+    this.finished = false;
+    this.lines = lines;
+    this.root = root;
+    this.scroller = scroller;
+    this.slot = slot;
+    this.plate = plate;
   }
   /**
-   * Scales the glow: 0 is the moment the finger starts moving, 1 is the
-   * swipe threshold — the point at which the paragraph is actually moved.
+   * Cuts `range` out of `view`. Returns the effect, or the reason there is
+   * none — the caller logs it, because on a phone there is no other way to
+   * see why the effect did not come up.
+   */
+  static attach(view, range) {
+    const located = paragraphLines(view, range);
+    if (typeof located === "string") {
+      return { cut: null, reason: located };
+    }
+    const rect = unionRect(located);
+    if (rect === null) {
+      return { cut: null, reason: "no-box" };
+    }
+    const root = editorRoot(view);
+    const scroller = view.contentEl.querySelector(".cm-scroller");
+    scroller == null ? void 0 : scroller.classList.add(CARRIER_CLASS);
+    const slot = appendOverlay(SLOT_CLASS, rect);
+    const plate = appendOverlay(PLATE_CLASS, rect);
+    for (const line of located) {
+      line.classList.add(LINE_CLASS);
+    }
+    root.classList.add(ACTIVE_CLASS);
+    return { cut: new _SwipeCut(located, root, scroller, slot, plate), reason: null };
+  }
+  /** Moves the block to follow the finger. Horizontal travel, in pixels. */
+  setShift(deltaX) {
+    if (this.finished) {
+      return;
+    }
+    const shift = Number.isFinite(deltaX) ? `${deltaX.toFixed(1)}px` : "0px";
+    this.root.style.setProperty(SHIFT_PROPERTY, shift);
+    this.plate.style.setProperty(SHIFT_PROPERTY, shift);
+  }
+  /**
+   * Scales the effect: 0 is the first pixel of the swipe, 1 the threshold —
+   * the point at which the paragraph really moves.
    */
   setProgress(progress) {
-    const element = this.element;
-    if (element === null) {
+    if (this.finished) {
       return;
     }
     const clamped = clampProgress(progress);
-    if (Math.abs(clamped - this.lastProgress) < PROGRESS_EPSILON) {
+    if (Math.abs(clamped - this.lastProgress) < 0.01) {
       return;
     }
     this.lastProgress = clamped;
-    element.style.setProperty(PROGRESS_PROPERTY, clamped.toFixed(3));
+    const value = clamped.toFixed(3);
+    this.root.style.setProperty(PROGRESS_PROPERTY, value);
+    this.plate.style.setProperty(PROGRESS_PROPERTY, value);
   }
-  /**
-   * Takes the glow off the screen at once. Use it whenever the viewport is
-   * about to move: a band left over a scrolling paragraph would point at the
-   * wrong text.
-   */
-  hide() {
-    const element = this.element;
-    if (element === null) {
+  /** The swipe was abandoned: the block slides back into its slot. */
+  release() {
+    if (this.finished) {
       return;
     }
-    this.element = null;
-    element.remove();
+    this.plate.classList.add(PLATE_OUT_CLASS);
+    this.scheduleCleanup(RELEASE_MS);
   }
-  /**
-   * Lets the glow die out on its own instead of blinking away. Only safe
-   * while the viewport stays where it is — i.e. at the end of a swipe that
-   * was claimed and therefore blocks scrolling.
-   */
-  fadeOut() {
-    const element = this.element;
-    if (element === null) {
+  /** The block was accepted: it flies off to the right and leaves. */
+  detach() {
+    if (this.finished) {
       return;
     }
-    this.element = null;
-    element.classList.add(FADE_OUT_CLASS);
+    this.plate.classList.add(PLATE_DETACHED_CLASS);
+    this.scheduleCleanup(DETACH_MS);
+  }
+  /** Removes the effect at once, for when the text is about to move. */
+  drop() {
+    if (this.finished) {
+      return;
+    }
+    this.cleanup();
+  }
+  scheduleCleanup(delayMs) {
+    this.finished = true;
     window.setTimeout(() => {
-      element.remove();
-    }, FADE_OUT_MS);
+      this.cleanup();
+    }, delayMs);
+  }
+  cleanup() {
+    var _a;
+    this.finished = true;
+    for (const line of this.lines) {
+      line.classList.remove(LINE_CLASS);
+    }
+    this.root.classList.remove(ACTIVE_CLASS);
+    this.root.style.removeProperty(SHIFT_PROPERTY);
+    this.root.style.removeProperty(PROGRESS_PROPERTY);
+    (_a = this.scroller) == null ? void 0 : _a.classList.remove(CARRIER_CLASS);
+    this.slot.remove();
+    this.plate.remove();
   }
 };
 
 // src/main.ts
+function describeElement(element) {
+  const id = element.id === "" ? "" : `#${element.id}`;
+  const classes = element.className === "" ? "" : `.${String(element.className).trim().split(/\s+/).join(".")}`;
+  return `${element.tagName.toLowerCase()}${id}${classes}`.slice(0, 60);
+}
 var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
     this.gesture = null;
-    /** The glow of the swipe in progress, if any. */
-    this.glow = null;
+    /** The paragraph being carried away by the swipe in progress, if any. */
+    this.cut = null;
   }
   async onload() {
     await this.loadSettings();
+    this.debugLog(`loaded (threshold ${this.settings.swipeThresholdPx} px)`);
     this.addSettingTab(new ParagraphSwipeSettingTab(this.app, this));
     this.registerDomEvent(
       window,
@@ -685,7 +736,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       window,
       "scroll",
       () => {
-        this.dropGlow();
+        this.dropCut();
       },
       { capture: true, passive: true }
     );
@@ -700,7 +751,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   }
   onunload() {
     this.gesture = null;
-    this.dropGlow();
+    this.dropCut();
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -754,23 +805,28 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       return;
     }
     this.gesture = null;
-    this.dropGlow();
-    if (event.touches.length !== 1) {
+    this.dropCut();
+    const touch = event.touches[0];
+    if (event.touches.length !== 1 || touch === void 0) {
+      this.debugLog(`touchstart ignored: ${event.touches.length} finger(s)`);
       return;
     }
-    const touch = event.touches[0];
     const target = event.target;
     if (!(target instanceof Element)) {
+      this.debugLog("touchstart ignored: the target is not an element");
       return;
     }
     const selection = window.getSelection();
     if (selection !== null && !selection.isCollapsed) {
+      this.debugLog("touchstart ignored: there is a text selection");
       return;
     }
     const view = this.findSourceMarkdownView(target);
     if (view === null) {
+      this.debugLog(`touchstart ignored: no editable source view under ${describeElement(target)}`);
       return;
     }
+    this.debugLog(`touchstart at (${Math.round(touch.clientX)}, ${Math.round(touch.clientY)}) on ${describeElement(target)}`);
     this.gesture = {
       touchId: touch.identifier,
       startX: touch.clientX,
@@ -781,15 +837,24 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       released: false,
       consumed: false,
       claimedMoves: 0,
-      lastDeltaX: 0
+      lastDeltaX: 0,
+      paragraph: null,
+      effectBroken: false
     };
   }
   onTouchMove(event) {
     const gesture = this.gesture;
     if (gesture === null || gesture.released) {
+      this.debugLog("touchmove ignored: no live gesture");
       return;
     }
     const touch = touchById(event.changedTouches, gesture.touchId);
+    if (gesture.claimedMoves === 0) {
+      const first = touch === null ? null : touchById(event.changedTouches, gesture.touchId);
+      this.debugLog(
+        first === null ? "first touchmove: the finger is not in changedTouches" : `first touchmove: dx ${Math.round(first.clientX - gesture.startX)} px, dy ${Math.round(first.clientY - gesture.startY)} px`
+      );
+    }
     if (touch === null) {
       return;
     }
@@ -799,39 +864,37 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       gesture.claimedMoves += 1;
       const deltaX2 = touch.clientX - gesture.startX;
       gesture.lastDeltaX = deltaX2;
-      this.updateGlow(deltaX2);
+      this.feedCut(gesture, deltaX2);
       if (!gesture.consumed && deltaX2 >= threshold) {
         gesture.consumed = true;
-        this.openPickerSafely(gesture.view, gesture.startX, gesture.startY);
+        this.openPickerSafely(gesture);
       }
       return;
     }
     if (event.touches.length !== 1) {
       gesture.released = true;
-      this.dropGlow();
+      this.dropCut();
       return;
     }
     const deltaX = touch.clientX - gesture.startX;
     const deltaY = touch.clientY - gesture.startY;
-    if (this.glow === null && isCRAZYIntent(deltaX)) {
-      this.startGlow(gesture, deltaX);
-    }
-    this.updateGlow(deltaX);
-    const decision = decideGesture(deltaX, deltaY);
+    const decision = decideGesture(deltaX, deltaY, decisionDistancePx(gesture.startX));
+    this.feedCut(gesture, deltaX);
     if (decision === "undecided") {
       return;
     }
     if (decision !== "rightward") {
       gesture.released = true;
-      this.dropGlow();
+      this.dropCut();
       return;
     }
     gesture.claimed = true;
     this.swallowTouch(event);
     this.debugLog(`swipe claimed (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px)`);
+    this.debugLog(`claimed at dx ${Math.round(deltaX)} px`);
     if (deltaX >= threshold) {
       gesture.consumed = true;
-      this.openPickerSafely(gesture.view, gesture.startX, gesture.startY);
+      this.openPickerSafely(gesture);
     }
   }
   onTouchEnd(event) {
@@ -841,42 +904,45 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     const touch = touchById(event.changedTouches, gesture.touchId);
     if (touch === null) {
-      this.dropGlow();
+      this.dropCut();
       return;
     }
     this.gesture = null;
-    this.stopGlow();
     const deltaX = touch.clientX - gesture.startX;
     const deltaY = touch.clientY - gesture.startY;
     if (gesture.claimed) {
       this.swallowTouch(event);
-      if (!gesture.consumed) {
-        if (deltaX >= this.settings.swipeThresholdPx) {
-          gesture.consumed = true;
-          this.debugLog(
-            `opening the picker from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`
-          );
-          this.openPickerSafely(gesture.view, gesture.startX, gesture.startY);
-        } else {
-          this.debugLog(
-            `swipe ended below the threshold (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px, threshold ${this.settings.swipeThresholdPx} px, ${gesture.claimedMoves} move event(s) received)`
-          );
-        }
+      if (gesture.consumed) {
+        this.dropCut();
+      } else if (deltaX >= this.settings.swipeThresholdPx) {
+        gesture.consumed = true;
+        this.debugLog(
+          `opening the picker from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`
+        );
+        this.openPickerSafely(gesture);
+      } else {
+        this.debugLog(
+          `swipe ended below the threshold (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px, threshold ${this.settings.swipeThresholdPx} px, ${gesture.claimedMoves} move event(s) received)`
+        );
+        this.releaseCut();
       }
       this.collapseLeftDrawerIfOpenedByGesture(gesture);
       return;
     }
     if (gesture.released || gesture.consumed) {
+      this.releaseCut();
       return;
     }
     if (decideGesture(deltaX, deltaY) === "rightward" && isRightwardSwipe(deltaX, deltaY, this.settings.swipeThresholdPx)) {
-      this.openPickerSafely(gesture.view, gesture.startX, gesture.startY);
+      this.openPickerSafely(gesture);
+    } else {
+      this.releaseCut();
     }
   }
   onTouchCancel(event) {
     const gesture = this.gesture;
     this.gesture = null;
-    this.dropGlow();
+    this.dropCut();
     if (gesture !== null && gesture.claimed) {
       this.swallowTouch(event);
       if (!gesture.consumed) {
@@ -897,10 +963,10 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     event.preventDefault();
   }
   /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
-  openPickerSafely(view, x, y) {
-    this.stopGlow();
+  openPickerSafely(gesture) {
+    this.detachCut();
     try {
-      this.triggerSwipe(view, x, y);
+      this.triggerSwipe(gesture);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Paragraph Swipe: failed to open the picker", error);
@@ -908,55 +974,103 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
   }
   /**
-   * Progress channel for the glow: a pointermove is only ever used to grow
-   * the band, never to claim or swallow anything. Gestures only ever start
-   * from a touchstart, so there is nothing to do without one.
+   * Progress channel for the effect: a pointermove only ever moves the block
+   * along, it never claims or swallows anything. Gestures only start from a
+   * touchstart, so there is nothing to do without one.
    */
   onPointerMove(event) {
     const gesture = this.gesture;
-    if (gesture === null || gesture.released || this.glow === null || !event.isPrimary) {
+    if (gesture === null || gesture.released || this.cut === null || !event.isPrimary) {
       return;
     }
     const deltaX = event.clientX - gesture.startX;
     gesture.lastDeltaX = deltaX;
-    this.updateGlow(deltaX);
+    this.feedCut(gesture, deltaX);
   }
   /**
-   * Lays a glowing band over the paragraph this swipe is about to move.
-   * Measuring happens once, here: from now on the gesture swallows its own
-   * touchmove events, so the editor cannot scroll and the paragraph cannot
-   * drift away from the band.
+   * Starts the effect if it is not up yet and carries it to the finger. The
+   * whole feedback is optional: an exception in it must not abort the
+   * touchmove handler, or the gesture would never be claimed and the app's own
+   * edge gestures would take over. One failure disables it for the rest of
+   * the gesture instead of repeating it on every move.
    */
-  startGlow(gesture, deltaX) {
-    this.dropGlow();
+  feedCut(gesture, deltaX) {
+    if (gesture.effectBroken || gesture.consumed) {
+      return;
+    }
+    try {
+      if (this.cut === null) {
+        if (!isCRAZYIntent(deltaX)) {
+          return;
+        }
+        this.startCut(gesture, deltaX);
+      } else {
+        this.updateCut(deltaX);
+      }
+    } catch (error) {
+      gesture.effectBroken = true;
+      this.dropCut();
+      console.warn("Paragraph Swipe: the cut effect failed and was switched off for this gesture", error);
+      this.debugLog("the cut effect failed; the swipe itself keeps working");
+    }
+  }
+  /**
+   * Cuts the paragraph under the finger out of its note and hands it to the
+   * swipe. Everything is measured once, here: from now on the gesture
+   * swallows its own touchmove events, so the editor cannot scroll and the
+   * block cannot drift away from the finger.
+   */
+  startCut(gesture, deltaX) {
+    this.dropCut();
     const lookup = this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-    if (lookup.kind !== "paragraph") {
+    if (lookup.kind === "blank") {
+      this.debugLog(`the swipe started on a blank line (line ${lookup.line + 1}); nothing to cut out`);
       return;
     }
-    const glow = SwipeGlow.attach(gesture.view, lookup.range);
-    if (glow === null) {
-      this.debugLog(`cannot measure the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end}; no glow`);
+    if (lookup.kind === "unresolved") {
+      this.debugLog(`cannot resolve the editor position under the finger; ${lookup.detail}`);
       return;
     }
-    this.glow = glow;
-    glow.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+    gesture.paragraph = lookup;
+    const { cut, reason } = SwipeCut.attach(gesture.view, lookup.range);
+    if (cut === null) {
+      this.debugLog(
+        `the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end} cannot be cut out (${reason})`
+      );
+      return;
+    }
+    this.cut = cut;
+    cut.setShift(deltaX);
+    cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+    this.debugLog(
+      `the block on lines ${lookup.range.start + 1}\u2013${lookup.range.end} was cut out (${lookup.strategy})`
+    );
   }
-  /** Grows the band to match the travelled distance. A no-op without one. */
-  updateGlow(deltaX) {
-    var _a;
-    (_a = this.glow) == null ? void 0 : _a.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+  /** Carries the block to the finger's position. A no-op without one. */
+  updateCut(deltaX) {
+    if (this.cut === null) {
+      return;
+    }
+    this.cut.setShift(deltaX);
+    this.cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
   }
-  /** Lets the band fade out. Safe when no swipe is running. */
-  stopGlow() {
-    const glow = this.glow;
-    this.glow = null;
-    glow == null ? void 0 : glow.fadeOut();
+  /** The swipe was abandoned: the block glides back into its slot. */
+  releaseCut() {
+    const cut = this.cut;
+    this.cut = null;
+    cut == null ? void 0 : cut.release();
   }
-  /** Removes the band at once, for when the text under it is about to move. */
-  dropGlow() {
-    const glow = this.glow;
-    this.glow = null;
-    glow == null ? void 0 : glow.hide();
+  /** The block was accepted: it flies off to the right and leaves. */
+  detachCut() {
+    const cut = this.cut;
+    this.cut = null;
+    cut == null ? void 0 : cut.detach();
+  }
+  /** Snaps the block back at once, for when the text is about to move. */
+  dropCut() {
+    const cut = this.cut;
+    this.cut = null;
+    cut == null ? void 0 : cut.drop();
   }
   /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
   isLeftDrawerOpen() {
@@ -995,8 +1109,8 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   }
   /**
    * Finds the paragraph under the given viewport coordinates. Silent on
-   * purpose: the glow must not spam the debug log on every claim, so only
-   * the picker reports why there is nothing to move.
+   * purpose: the swipe must not spam the debug log, so only the picker
+   * reports why there is nothing to move.
    */
   lookupParagraph(view, x, y) {
     const editor = view.editor;
@@ -1010,9 +1124,21 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     return { kind: "paragraph", range, strategy: resolved.strategy };
   }
-  /** Opens the note picker for the paragraph under the given coordinates. */
-  triggerSwipe(view, x, y) {
-    const lookup = this.lookupParagraph(view, x, y);
+  /**
+   * The paragraph this gesture is about: the one the cut effect resolved, or
+   * a fresh lookup for the rare flick that never got far enough to start one.
+   */
+  paragraphOf(gesture) {
+    if (gesture.paragraph === null) {
+      return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
+    }
+    return { kind: "paragraph", range: gesture.paragraph.range, strategy: gesture.paragraph.strategy };
+  }
+  /** Opens the note picker for the paragraph this gesture started on. */
+  triggerSwipe(gesture) {
+    const view = gesture.view;
+    const { startX: x, startY: y } = gesture;
+    const lookup = this.paragraphOf(gesture);
     if (lookup.kind === "unresolved") {
       this.debugLog(
         `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${lookup.detail}`
