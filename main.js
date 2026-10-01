@@ -71,12 +71,12 @@ function findVisibleLineIndexAtY(firstVisible, lastVisible, y, rectAt) {
   return null;
 }
 
-// src/editor-position.ts
+// src/lib/runtime-probe.ts
 function safely(probe) {
   try {
     return probe();
   } catch (error) {
-    console.warn("Paragraph Swipe: a position probe failed", error);
+    console.warn("Paragraph Swipe: a runtime probe failed", error);
     return null;
   }
 }
@@ -95,6 +95,19 @@ function readNumber(host, key) {
   const raw = typeof value === "function" ? safely(() => value.call(host)) : value;
   return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
+function readElement(host, key) {
+  const value = readProperty(host, key);
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value;
+  if (typeof record["getBoundingClientRect"] !== "function") {
+    return null;
+  }
+  return value;
+}
+
+// src/editor-position.ts
 function asEditorPosition(value) {
   if (typeof value !== "object" || value === null) {
     return null;
@@ -206,6 +219,16 @@ var MIN_VERTICAL_TOLERANCE_PX = 24;
 var DECISION_DISTANCE_PX = 12;
 function verticalTolerancePx(swipeThresholdPx) {
   return Math.max(MIN_VERTICAL_TOLERANCE_PX, Math.round(swipeThresholdPx / 2));
+}
+function isCRAZYIntent(deltaX) {
+  return deltaX >= 1;
+}
+function swipeProgress(deltaX, swipeThresholdPx) {
+  if (!Number.isFinite(deltaX) || deltaX <= 0) {
+    return 0;
+  }
+  const threshold = swipeThresholdPx > 0 ? swipeThresholdPx : 1;
+  return Math.pow(Math.min(1, deltaX / threshold), 0.6);
 }
 function isRightwardSwipe(deltaX, deltaY, swipeThresholdPx) {
   if (deltaX < swipeThresholdPx) {
@@ -445,12 +468,183 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
   }
 };
 
+// src/swipe-glow.ts
+var GLOW_CLASS = "paragraph-swipe-glow";
+var FADE_OUT_CLASS = "paragraph-swipe-glow--out";
+var FADE_OUT_MS = 240;
+var PROGRESS_PROPERTY = "--paragraph-swipe-progress";
+var PROGRESS_EPSILON = 0.01;
+function clampProgress(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, value));
+}
+function asLineBounds(value) {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const record = value;
+  const top = record["top"];
+  const bottom = record["bottom"];
+  if (typeof top !== "number" || !Number.isFinite(top)) {
+    return null;
+  }
+  if (typeof bottom !== "number" || !Number.isFinite(bottom)) {
+    return null;
+  }
+  return { top, bottom };
+}
+function lineBoundsAtPos(editor, pos) {
+  const coordsAtPos = readFunction(editor, "coordsAtPos");
+  if (coordsAtPos === null) {
+    return null;
+  }
+  return safely(() => asLineBounds(coordsAtPos.call(editor, pos)));
+}
+function codeMirrorView(editor) {
+  const cm = readProperty(editor, "cm");
+  return typeof cm === "object" && cm !== null ? cm : null;
+}
+function horizontalPadding(element) {
+  const style = window.getComputedStyle(element);
+  const left = Number.parseFloat(style.paddingLeft);
+  const right = Number.parseFloat(style.paddingRight);
+  return {
+    left: Number.isFinite(left) ? left : 0,
+    right: Number.isFinite(right) ? right : 0
+  };
+}
+function textColumn(view) {
+  const editor = view.editor;
+  const cm = codeMirrorView(editor);
+  const candidates = [
+    readElement(editor, "scrollEl"),
+    readElement(editor, "containerEl"),
+    cm === null ? null : readElement(cm, "scroller"),
+    cm === null ? null : readElement(cm, "contentEl"),
+    view.contentEl
+  ];
+  for (const element of candidates) {
+    if (element === null) {
+      continue;
+    }
+    const rect = element.getBoundingClientRect();
+    if (!Number.isFinite(rect.left) || !Number.isFinite(rect.right) || rect.width <= 0) {
+      continue;
+    }
+    const padding = horizontalPadding(element);
+    const left = rect.left + padding.left;
+    const right = rect.right - padding.right;
+    if (right > left) {
+      return { left, right };
+    }
+  }
+  return null;
+}
+function paragraphGlowBounds(view, range) {
+  var _a;
+  const editor = view.editor;
+  const first = lineBoundsAtPos(editor, { line: range.start, ch: 0 });
+  if (first === null) {
+    return null;
+  }
+  const lastLine = Math.min(range.end - 1, Math.max(editor.lineCount() - 1, 0));
+  const lastText = (_a = editor.getLine(lastLine)) != null ? _a : "";
+  const last = lineBoundsAtPos(editor, { line: lastLine, ch: Math.max(lastText.length - 1, 0) });
+  if (last === null) {
+    return null;
+  }
+  const viewportHeight = window.innerHeight;
+  const viewportWidth = window.innerWidth;
+  const top = Math.max(first.top, 0);
+  const bottom = Math.min(last.bottom, viewportHeight);
+  if (bottom <= top) {
+    return null;
+  }
+  const column = textColumn(view);
+  const left = column === null ? 0 : Math.max(column.left, 0);
+  const right = column === null ? viewportWidth : Math.min(column.right, viewportWidth);
+  if (right <= left) {
+    return null;
+  }
+  return { top, bottom, left, right };
+}
+var SwipeGlow = class _SwipeGlow {
+  constructor(element) {
+    this.lastProgress = -1;
+    this.element = element;
+  }
+  /** Lays a glow over `range`, or returns null if the paragraph is unmeasurable. */
+  static attach(view, range) {
+    const bounds = paragraphGlowBounds(view, range);
+    if (bounds === null) {
+      return null;
+    }
+    const element = document.createElement("div");
+    element.className = GLOW_CLASS;
+    element.style.top = `${Math.round(bounds.top)}px`;
+    element.style.height = `${Math.round(bounds.bottom - bounds.top)}px`;
+    element.style.left = `${Math.round(bounds.left)}px`;
+    element.style.width = `${Math.round(bounds.right - bounds.left)}px`;
+    document.body.appendChild(element);
+    return new _SwipeGlow(element);
+  }
+  /**
+   * Scales the glow: 0 is the moment the finger starts moving, 1 is the
+   * swipe threshold — the point at which the paragraph is actually moved.
+   */
+  setProgress(progress) {
+    const element = this.element;
+    if (element === null) {
+      return;
+    }
+    const clamped = clampProgress(progress);
+    if (Math.abs(clamped - this.lastProgress) < PROGRESS_EPSILON) {
+      return;
+    }
+    this.lastProgress = clamped;
+    element.style.setProperty(PROGRESS_PROPERTY, clamped.toFixed(3));
+  }
+  /**
+   * Takes the glow off the screen at once. Use it whenever the viewport is
+   * about to move: a band left over a scrolling paragraph would point at the
+   * wrong text.
+   */
+  hide() {
+    const element = this.element;
+    if (element === null) {
+      return;
+    }
+    this.element = null;
+    element.remove();
+  }
+  /**
+   * Lets the glow die out on its own instead of blinking away. Only safe
+   * while the viewport stays where it is — i.e. at the end of a swipe that
+   * was claimed and therefore blocks scrolling.
+   */
+  fadeOut() {
+    const element = this.element;
+    if (element === null) {
+      return;
+    }
+    this.element = null;
+    element.classList.add(FADE_OUT_CLASS);
+    window.setTimeout(() => {
+      element.remove();
+    }, FADE_OUT_MS);
+  }
+};
+
 // src/main.ts
 var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
     this.gesture = null;
+    /** The glow of the swipe in progress, if any. */
+    this.glow = null;
   }
   async onload() {
     await this.loadSettings();
@@ -487,9 +681,26 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       },
       { capture: true, passive: true }
     );
+    this.registerDomEvent(
+      window,
+      "scroll",
+      () => {
+        this.dropGlow();
+      },
+      { capture: true, passive: true }
+    );
+    this.registerDomEvent(
+      window,
+      "pointermove",
+      (event) => {
+        this.onPointerMove(event);
+      },
+      { capture: true, passive: true }
+    );
   }
   onunload() {
     this.gesture = null;
+    this.dropGlow();
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -543,6 +754,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       return;
     }
     this.gesture = null;
+    this.dropGlow();
     if (event.touches.length !== 1) {
       return;
     }
@@ -587,6 +799,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       gesture.claimedMoves += 1;
       const deltaX2 = touch.clientX - gesture.startX;
       gesture.lastDeltaX = deltaX2;
+      this.updateGlow(deltaX2);
       if (!gesture.consumed && deltaX2 >= threshold) {
         gesture.consumed = true;
         this.openPickerSafely(gesture.view, gesture.startX, gesture.startY);
@@ -595,16 +808,22 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     if (event.touches.length !== 1) {
       gesture.released = true;
+      this.dropGlow();
       return;
     }
     const deltaX = touch.clientX - gesture.startX;
     const deltaY = touch.clientY - gesture.startY;
+    if (this.glow === null && isCRAZYIntent(deltaX)) {
+      this.startGlow(gesture, deltaX);
+    }
+    this.updateGlow(deltaX);
     const decision = decideGesture(deltaX, deltaY);
     if (decision === "undecided") {
       return;
     }
     if (decision !== "rightward") {
       gesture.released = true;
+      this.dropGlow();
       return;
     }
     gesture.claimed = true;
@@ -622,9 +841,11 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     const touch = touchById(event.changedTouches, gesture.touchId);
     if (touch === null) {
+      this.dropGlow();
       return;
     }
     this.gesture = null;
+    this.stopGlow();
     const deltaX = touch.clientX - gesture.startX;
     const deltaY = touch.clientY - gesture.startY;
     if (gesture.claimed) {
@@ -655,6 +876,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   onTouchCancel(event) {
     const gesture = this.gesture;
     this.gesture = null;
+    this.dropGlow();
     if (gesture !== null && gesture.claimed) {
       this.swallowTouch(event);
       if (!gesture.consumed) {
@@ -676,6 +898,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   }
   /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
   openPickerSafely(view, x, y) {
+    this.stopGlow();
     try {
       this.triggerSwipe(view, x, y);
     } catch (error) {
@@ -683,6 +906,57 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       console.error("Paragraph Swipe: failed to open the picker", error);
       new import_obsidian3.Notice(`Paragraph Swipe: internal error \u2014 ${message}`);
     }
+  }
+  /**
+   * Progress channel for the glow: a pointermove is only ever used to grow
+   * the band, never to claim or swallow anything. Gestures only ever start
+   * from a touchstart, so there is nothing to do without one.
+   */
+  onPointerMove(event) {
+    const gesture = this.gesture;
+    if (gesture === null || gesture.released || this.glow === null || !event.isPrimary) {
+      return;
+    }
+    const deltaX = event.clientX - gesture.startX;
+    gesture.lastDeltaX = deltaX;
+    this.updateGlow(deltaX);
+  }
+  /**
+   * Lays a glowing band over the paragraph this swipe is about to move.
+   * Measuring happens once, here: from now on the gesture swallows its own
+   * touchmove events, so the editor cannot scroll and the paragraph cannot
+   * drift away from the band.
+   */
+  startGlow(gesture, deltaX) {
+    this.dropGlow();
+    const lookup = this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
+    if (lookup.kind !== "paragraph") {
+      return;
+    }
+    const glow = SwipeGlow.attach(gesture.view, lookup.range);
+    if (glow === null) {
+      this.debugLog(`cannot measure the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end}; no glow`);
+      return;
+    }
+    this.glow = glow;
+    glow.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+  }
+  /** Grows the band to match the travelled distance. A no-op without one. */
+  updateGlow(deltaX) {
+    var _a;
+    (_a = this.glow) == null ? void 0 : _a.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+  }
+  /** Lets the band fade out. Safe when no swipe is running. */
+  stopGlow() {
+    const glow = this.glow;
+    this.glow = null;
+    glow == null ? void 0 : glow.fadeOut();
+  }
+  /** Removes the band at once, for when the text under it is about to move. */
+  dropGlow() {
+    const glow = this.glow;
+    this.glow = null;
+    glow == null ? void 0 : glow.hide();
   }
   /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
   isLeftDrawerOpen() {
@@ -719,21 +993,35 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       collapse.call(leftSplit);
     }
   }
-  /** Opens the note picker for the paragraph under the given coordinates. */
-  triggerSwipe(view, x, y) {
+  /**
+   * Finds the paragraph under the given viewport coordinates. Silent on
+   * purpose: the glow must not spam the debug log on every claim, so only
+   * the picker reports why there is nothing to move.
+   */
+  lookupParagraph(view, x, y) {
     const editor = view.editor;
     const resolved = posAtClientPoint(editor, x, y);
     if (resolved === null) {
+      return { kind: "unresolved", detail: describePositionStrategies(editor) };
+    }
+    const range = getParagraphRange(splitLines(editor.getValue()), resolved.position.line);
+    if (range === null) {
+      return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
+    }
+    return { kind: "paragraph", range, strategy: resolved.strategy };
+  }
+  /** Opens the note picker for the paragraph under the given coordinates. */
+  triggerSwipe(view, x, y) {
+    const lookup = this.lookupParagraph(view, x, y);
+    if (lookup.kind === "unresolved") {
       this.debugLog(
-        `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${describePositionStrategies(editor)}`
+        `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${lookup.detail}`
       );
       return;
     }
-    const lines = splitLines(editor.getValue());
-    const range = getParagraphRange(lines, resolved.position.line);
-    if (range === null) {
+    if (lookup.kind === "blank") {
       this.debugLog(
-        `the swipe started on a blank line (line ${resolved.position.line + 1}, via ${resolved.strategy}) \u2014 nothing to move`
+        `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) \u2014 nothing to move`
       );
       return;
     }
@@ -743,9 +1031,9 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       return;
     }
     this.debugLog(
-      `opening the picker for the paragraph on lines ${range.start + 1}\u2013${range.end} (via ${resolved.strategy})`
+      `opening the picker for the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end} (via ${lookup.strategy})`
     );
-    const startLine = range.start;
+    const startLine = lookup.range.start;
     const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile) => {
       void this.moveParagraph(view, startLine, targetFile).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);

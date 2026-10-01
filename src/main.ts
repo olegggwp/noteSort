@@ -1,7 +1,7 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 
 import { describePositionStrategies, isEditorEditable, posAtClientPoint } from "./editor-position";
-import { decideGesture, isRightwardSwipe, touchById } from "./lib/gesture";
+import { decideGesture, isCRAZYIntent, isRightwardSwipe, swipeProgress, touchById } from "./lib/gesture";
 import {
     appendParagraphToText,
     extractParagraphLines,
@@ -12,9 +12,17 @@ import {
     splitLines,
     toCharRange,
 } from "./lib/paragraph";
+import type { ParagraphRange } from "./lib/paragraph";
 import { NotePickerModal } from "./note-picker-modal";
 import { clampSwipeThreshold, DEFAULT_SETTINGS, ParagraphSwipeSettingTab } from "./settings";
 import type { ParagraphSwipeSettings } from "./settings";
+import { SwipeGlow } from "./swipe-glow";
+
+/** Outcome of resolving the paragraph under a viewport point. */
+type ParagraphLookup =
+    | { readonly kind: "paragraph"; readonly range: ParagraphRange; readonly strategy: string }
+    | { readonly kind: "unresolved"; readonly detail: string }
+    | { readonly kind: "blank"; readonly line: number; readonly strategy: string };
 
 interface TouchGesture {
     readonly touchId: number;
@@ -49,11 +57,18 @@ interface TouchGesture {
  * after a claimed gesture, the threshold is re-checked on touchend. Vertical
  * scrolls, leftward drags, and gestures with a second finger before the claim
  * are never blocked; an already claimed gesture survives stray extra touches.
+ *
+ * A claimed swipe lights up the paragraph it is about to move: a glowing band
+ * whose brightness grows with the travelled distance (see `SwipeGlow`), so the
+ * threshold is visible before the picker takes over.
  */
 export default class ParagraphSwipePlugin extends Plugin {
     public settings: ParagraphSwipeSettings = { ...DEFAULT_SETTINGS };
 
     private gesture: TouchGesture | null = null;
+
+    /** The glow of the swipe in progress, if any. */
+    private glow: SwipeGlow | null = null;
 
     public async onload(): Promise<void> {
         await this.loadSettings();
@@ -93,10 +108,37 @@ export default class ParagraphSwipePlugin extends Plugin {
             },
             { capture: true, passive: true },
         );
+        // Safety net for the glow: a claimed swipe blocks scrolling, so any
+        // scroll seen while it is up means the viewport moved underneath the
+        // band (the picker opening, the layout resizing) and it must go.
+        // Capture is what makes the non-bubbling scroll of any element in the
+        // document reach the window listener.
+        this.registerDomEvent(
+            window,
+            "scroll",
+            () => {
+                this.dropGlow();
+            },
+            { capture: true, passive: true },
+        );
+        // Second channel for the glow's progress. Some WebView builds stop
+        // delivering touchmove once the gesture is claimed (which is why the
+        // threshold is re-checked on touchend); pointer events are generated
+        // from the same input pipeline independently, so the band keeps
+        // growing with the finger there. Passive: we only read coordinates.
+        this.registerDomEvent(
+            window,
+            "pointermove",
+            (event: PointerEvent) => {
+                this.onPointerMove(event);
+            },
+            { capture: true, passive: true },
+        );
     }
 
     public onunload(): void {
         this.gesture = null;
+        this.dropGlow();
     }
 
     public async saveSettings(): Promise<void> {
@@ -156,6 +198,7 @@ export default class ParagraphSwipePlugin extends Plugin {
             return; // a stray second finger must not kill an active claimed swipe
         }
         this.gesture = null;
+        this.dropGlow();
         if (event.touches.length !== 1) {
             return;
         }
@@ -205,6 +248,7 @@ export default class ParagraphSwipePlugin extends Plugin {
             gesture.claimedMoves += 1;
             const deltaX = touch.clientX - gesture.startX;
             gesture.lastDeltaX = deltaX;
+            this.updateGlow(deltaX);
             if (!gesture.consumed && deltaX >= threshold) {
                 gesture.consumed = true;
                 this.openPickerSafely(gesture.view, gesture.startX, gesture.startY);
@@ -216,16 +260,28 @@ export default class ParagraphSwipePlugin extends Plugin {
             // A second finger landed before the claim (pinch, two-finger scroll):
             // never block it.
             gesture.released = true;
+            this.dropGlow();
             return;
         }
         const deltaX = touch.clientX - gesture.startX;
         const deltaY = touch.clientY - gesture.startY;
+        // The feedback starts with the first clearly rightward movement, well
+        // before the gesture is claimed, so the paragraph lights up while the
+        // finger is still travelling instead of once it is already over.
+        // if (this.glow === null && isRightwardIntent(deltaX, deltaY)) {
+        if (this.glow === null && isCRAZYIntent(deltaX)) {
+            this.startGlow(gesture, deltaX);
+        }
+        this.updateGlow(deltaX);
         const decision = decideGesture(deltaX, deltaY);
         if (decision === "undecided") {
             return;
         }
         if (decision !== "rightward") {
-            gesture.released = true; // scroll or leftward drag: none of our business
+            // Scroll or leftward drag: none of our business, and the band has
+            // to go before the text slides out from under it.
+            gesture.released = true;
+            this.dropGlow();
             return;
         }
         // Horizontal-dominant rightward drag over the editor: claim it before
@@ -246,9 +302,15 @@ export default class ParagraphSwipePlugin extends Plugin {
         }
         const touch = touchById(event.changedTouches, gesture.touchId);
         if (touch === null) {
+            // An end event we cannot attribute: the finger is gone and the
+            // viewport is in an unknown state, so drop the feedback at once.
+            this.dropGlow();
             return;
         }
         this.gesture = null;
+        // A claimed swipe has blocked scrolling, so nothing moved: the band
+        // may fade out gracefully.
+        this.stopGlow();
         const deltaX = touch.clientX - gesture.startX;
         const deltaY = touch.clientY - gesture.startY;
         if (gesture.claimed) {
@@ -286,6 +348,8 @@ export default class ParagraphSwipePlugin extends Plugin {
     private onTouchCancel(event: TouchEvent): void {
         const gesture = this.gesture;
         this.gesture = null;
+        // The system took the gesture away; the viewport may have moved with it.
+        this.dropGlow();
         if (gesture !== null && gesture.claimed) {
             this.swallowTouch(event);
             if (!gesture.consumed) {
@@ -309,6 +373,7 @@ export default class ParagraphSwipePlugin extends Plugin {
 
     /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
     private openPickerSafely(view: MarkdownView, x: number, y: number): void {
+        this.stopGlow(); // the picker takes over the feedback from here
         try {
             this.triggerSwipe(view, x, y);
         } catch (error) {
@@ -316,6 +381,61 @@ export default class ParagraphSwipePlugin extends Plugin {
             console.error("Paragraph Swipe: failed to open the picker", error);
             new Notice(`Paragraph Swipe: internal error — ${message}`);
         }
+    }
+
+    /**
+     * Progress channel for the glow: a pointermove is only ever used to grow
+     * the band, never to claim or swallow anything. Gestures only ever start
+     * from a touchstart, so there is nothing to do without one.
+     */
+    private onPointerMove(event: PointerEvent): void {
+        const gesture = this.gesture;
+        if (gesture === null || gesture.released || this.glow === null || !event.isPrimary) {
+            return; // a second finger must not drag the band away
+        }
+        const deltaX = event.clientX - gesture.startX;
+        gesture.lastDeltaX = deltaX;
+        this.updateGlow(deltaX);
+    }
+
+    /**
+     * Lays a glowing band over the paragraph this swipe is about to move.
+     * Measuring happens once, here: from now on the gesture swallows its own
+     * touchmove events, so the editor cannot scroll and the paragraph cannot
+     * drift away from the band.
+     */
+    private startGlow(gesture: TouchGesture, deltaX: number): void {
+        this.dropGlow();
+        const lookup = this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
+        if (lookup.kind !== "paragraph") {
+            return; // nothing is being moved, so nothing to highlight
+        }
+        const glow = SwipeGlow.attach(gesture.view, lookup.range);
+        if (glow === null) {
+            this.debugLog(`cannot measure the paragraph on lines ${lookup.range.start + 1}–${lookup.range.end}; no glow`);
+            return;
+        }
+        this.glow = glow;
+        glow.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+    }
+
+    /** Grows the band to match the travelled distance. A no-op without one. */
+    private updateGlow(deltaX: number): void {
+        this.glow?.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+    }
+
+    /** Lets the band fade out. Safe when no swipe is running. */
+    private stopGlow(): void {
+        const glow = this.glow;
+        this.glow = null;
+        glow?.fadeOut();
+    }
+
+    /** Removes the band at once, for when the text under it is about to move. */
+    private dropGlow(): void {
+        const glow = this.glow;
+        this.glow = null;
+        glow?.hide();
     }
 
     /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
@@ -355,21 +475,36 @@ export default class ParagraphSwipePlugin extends Plugin {
         }
     }
 
-    /** Opens the note picker for the paragraph under the given coordinates. */
-    private triggerSwipe(view: MarkdownView, x: number, y: number): void {
+    /**
+     * Finds the paragraph under the given viewport coordinates. Silent on
+     * purpose: the glow must not spam the debug log on every claim, so only
+     * the picker reports why there is nothing to move.
+     */
+    private lookupParagraph(view: MarkdownView, x: number, y: number): ParagraphLookup {
         const editor = view.editor;
         const resolved = posAtClientPoint(editor, x, y);
         if (resolved === null) {
+            return { kind: "unresolved", detail: describePositionStrategies(editor) };
+        }
+        const range = getParagraphRange(splitLines(editor.getValue()), resolved.position.line);
+        if (range === null) {
+            return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
+        }
+        return { kind: "paragraph", range, strategy: resolved.strategy };
+    }
+
+    /** Opens the note picker for the paragraph under the given coordinates. */
+    private triggerSwipe(view: MarkdownView, x: number, y: number): void {
+        const lookup = this.lookupParagraph(view, x, y);
+        if (lookup.kind === "unresolved") {
             this.debugLog(
-                `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${describePositionStrategies(editor)}`,
+                `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${lookup.detail}`,
             );
             return;
         }
-        const lines = splitLines(editor.getValue());
-        const range = getParagraphRange(lines, resolved.position.line);
-        if (range === null) {
+        if (lookup.kind === "blank") {
             this.debugLog(
-                `the swipe started on a blank line (line ${resolved.position.line + 1}, via ${resolved.strategy}) — nothing to move`,
+                `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) — nothing to move`,
             );
             return;
         }
@@ -379,9 +514,9 @@ export default class ParagraphSwipePlugin extends Plugin {
             return;
         }
         this.debugLog(
-            `opening the picker for the paragraph on lines ${range.start + 1}–${range.end} (via ${resolved.strategy})`,
+            `opening the picker for the paragraph on lines ${lookup.range.start + 1}–${lookup.range.end} (via ${lookup.strategy})`,
         );
-        const startLine = range.start;
+        const startLine = lookup.range.start;
         const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile: TFile) => {
             void this.moveParagraph(view, startLine, targetFile).catch((error: unknown) => {
                 const message = error instanceof Error ? error.message : String(error);

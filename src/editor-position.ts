@@ -1,6 +1,7 @@
 import { Editor, EditorPosition } from "obsidian";
 
 import { findLineIndexAtY, findVisibleLineIndexAtY, type VerticalBounds } from "./lib/coords";
+import { readFunction, readNumber, readProperty, safely } from "./lib/runtime-probe";
 
 /**
  * Screen-point to editor-position mapping.
@@ -33,38 +34,6 @@ interface ScreenPoint {
 export interface ResolvedPosition {
     readonly position: EditorPosition;
     readonly strategy: string;
-}
-
-/** Runs a probing call, converting any runtime exception into null. */
-function safely<T>(probe: () => T): T | null {
-    try {
-        return probe();
-    } catch (error) {
-        console.warn("Paragraph Swipe: a position probe failed", error);
-        return null;
-    }
-}
-
-/** Reads a property without assuming it exists in the static typings. */
-function readProperty(host: object, key: string): unknown {
-    return (host as unknown as Record<string, unknown>)[key];
-}
-
-/** Returns a property as a function, or null when it is not callable. */
-function readFunction(host: object, key: string): ((...args: unknown[]) => unknown) | null {
-    const value = readProperty(host, key);
-    if (typeof value !== "function") {
-        return null;
-    }
-    return value as (...args: unknown[]) => unknown;
-}
-
-/** Returns a property (or zero-argument method) as a finite number, or null. */
-function readNumber(host: object, key: string): number | null {
-    const value = readProperty(host, key);
-    const raw =
-        typeof value === "function" ? safely(() => (value as (...args: unknown[]) => unknown).call(host)) : value;
-    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
 
 /** Validates an unknown value as an editor position. */

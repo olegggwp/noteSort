@@ -18,3 +18,66 @@
     white-space: nowrap;
     text-overflow: ellipsis;
 }
+
+/*
+ * The glowing band over the paragraph a rightward swipe is about to move.
+ * Positioned by src/swipe-glow.ts; `--paragraph-swipe-progress` (0..1, the
+ * swipe's share of the threshold) makes the glow build up with the finger.
+ * Every visual is declared twice: a plain rgba fallback, then the
+ * theme-aware color-mix version that engines without color-mix() ignore.
+ */
+
+.paragraph-swipe-glow {
+    --paragraph-swipe-progress: 0;
+    --paragraph-swipe-edge: calc(3px + 5px * var(--paragraph-swipe-progress));
+    --paragraph-swipe-blur: calc(10px + 16px * var(--paragraph-swipe-progress));
+    position: fixed;
+    z-index: var(--layer-popover, 30);
+    box-sizing: border-box;
+    pointer-events: none;
+    border-radius: var(--radius-m, 8px);
+    opacity: calc(0.38 + 0.62 * var(--paragraph-swipe-progress));
+    transition: opacity 90ms linear;
+    background: linear-gradient(90deg, rgba(94, 160, 255, 0.38), rgba(94, 160, 255, 0.1) 62%, rgba(94, 160, 255, 0));
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--interactive-accent, #5ea0ff) 40%, transparent),
+        color-mix(in srgb, var(--interactive-accent, #5ea0ff) 12%, transparent) 62%,
+        transparent
+    );
+    /* The two offset shadows bleed out of the top and bottom edges; the spread
+       cancels the offset, so the glow is cut cleanly at the edge itself. */
+    box-shadow: 0 0 12px rgba(94, 160, 255, 0.45);
+    box-shadow:
+        0 calc(-1 * var(--paragraph-swipe-edge)) var(--paragraph-swipe-blur)
+            calc(-1 * var(--paragraph-swipe-edge)) rgba(94, 160, 255, 0.55),
+        0 var(--paragraph-swipe-edge) var(--paragraph-swipe-blur)
+            calc(-1 * var(--paragraph-swipe-edge)) rgba(94, 160, 255, 0.55),
+        0 0 calc(6px + 10px * var(--paragraph-swipe-progress)) rgba(94, 160, 255, 0.4);
+    box-shadow:
+        0 calc(-1 * var(--paragraph-swipe-edge)) var(--paragraph-swipe-blur)
+            calc(-1 * var(--paragraph-swipe-edge))
+            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
+        0 var(--paragraph-swipe-edge) var(--paragraph-swipe-blur)
+            calc(-1 * var(--paragraph-swipe-edge))
+            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
+        0 0 calc(6px + 10px * var(--paragraph-swipe-progress))
+            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 50%, transparent);
+    animation: paragraph-swipe-bloom 160ms ease-out;
+}
+
+/* The end of a swipe: the glow dies out instead of blinking away. */
+.paragraph-swipe-glow.paragraph-swipe-glow--out {
+    opacity: 0;
+    transition: opacity 220ms ease-out;
+}
+
+@keyframes paragraph-swipe-bloom {
+    from {
+        transform: scale(0.97);
+    }
+
+    to {
+        transform: scale(1);
+    }
+}
