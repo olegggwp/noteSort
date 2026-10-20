@@ -10,7 +10,7 @@ export interface NoteCandidate {
     readonly mtime: number;
 }
 
-export function tokenizeQuery(query: string): string[] {
+function tokenizeQuery(query: string): string[] {
     return query
         .toLowerCase()
         .split(/\s+/)
@@ -36,7 +36,10 @@ function matchesAllTokens(path: string, tokens: readonly string[]): boolean {
  * modification time, newest first. Ties are broken by path so the output is
  * deterministic. The input array is never modified.
  */
-export function filterAndSortNotes(candidates: readonly NoteCandidate[], query: string): NoteCandidate[] {
+export function filterAndSortNotes<T extends NoteCandidate>(
+    candidates: readonly T[],
+    query: string,
+): T[] {
     const tokens = tokenizeQuery(query);
     const matching =
         tokens.length === 0

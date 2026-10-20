@@ -376,13 +376,7 @@ var NotePickerModal = class extends import_obsidian.SuggestModal {
   constructor(app, sourcePath, onPick) {
     super(app);
     this.onPick = onPick;
-    const files = app.vault.getMarkdownFiles().filter((file) => file.path !== sourcePath);
-    this.candidates = files;
-    const filesByPath = /* @__PURE__ */ new Map();
-    for (const file of files) {
-      filesByPath.set(file.path, file);
-    }
-    this.filesByPath = filesByPath;
+    this.candidates = app.vault.getMarkdownFiles().filter((file) => file.path !== sourcePath).map((file) => ({ file, path: file.path, mtime: file.stat.mtime }));
     this.modalEl.addClass("paragraph-swipe-modal");
     this.emptyStateText = "No notes found.";
     this.setInstructions([
@@ -392,19 +386,7 @@ var NotePickerModal = class extends import_obsidian.SuggestModal {
     ]);
   }
   getSuggestions(query) {
-    const notes = this.candidates.map((file) => ({
-      path: file.path,
-      mtime: file.stat.mtime
-    }));
-    const matches = filterAndSortNotes(notes, query);
-    const suggestions = [];
-    for (const match of matches) {
-      const file = this.filesByPath.get(match.path);
-      if (file !== void 0) {
-        suggestions.push(file);
-      }
-    }
-    return suggestions;
+    return filterAndSortNotes(this.candidates, query).map((entry) => entry.file);
   }
   renderSuggestion(file, el) {
     el.createDiv({ cls: "paragraph-swipe-suggestion-title", text: file.basename });
@@ -539,7 +521,12 @@ function clampProgress(value) {
   }
   return Math.min(1, Math.max(0, value));
 }
+function contentElement(view) {
+  const content = view.contentEl.querySelector(".cm-content");
+  return content instanceof HTMLElement ? content : null;
+}
 function editorRoot(view) {
+  var _a;
   const cm = readProperty(view.editor, "cm");
   if (typeof cm === "object" && cm !== null) {
     const dom = readElement(cm, "dom");
@@ -547,8 +534,7 @@ function editorRoot(view) {
       return dom;
     }
   }
-  const content = view.contentEl.querySelector(".cm-content");
-  return content instanceof HTMLElement ? content : view.contentEl;
+  return (_a = contentElement(view)) != null ? _a : view.contentEl;
 }
 function lineIndexAtPoint(lines, x, y) {
   const element = safely(() => document.elementFromPoint(x, y));
@@ -560,8 +546,8 @@ function lineIndexAtPoint(lines, x, y) {
   return index < 0 ? -1 : index;
 }
 function paragraphLines(view, range, fingerLine, probeX, probeY) {
-  const container = view.contentEl.querySelector(".cm-content");
-  if (!(container instanceof HTMLElement)) {
+  const container = contentElement(view);
+  if (container === null) {
     return "no-lines";
   }
   const lines = Array.from(container.querySelectorAll(".cm-line"));
@@ -713,10 +699,8 @@ var SwipeCut = class _SwipeCut {
 };
 
 // src/main.ts
-function describeElement(element) {
-  const id = element.id === "" ? "" : `#${element.id}`;
-  const classes = element.className === "" ? "" : `.${String(element.className).trim().split(/\s+/).join(".")}`;
-  return `${element.tagName.toLowerCase()}${id}${classes}`.slice(0, 60);
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   constructor() {
@@ -839,25 +823,20 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     this.dropCut();
     const touch = event.touches[0];
     if (event.touches.length !== 1 || touch === void 0) {
-      this.debugLog(`touchstart ignored: ${event.touches.length} finger(s)`);
       return;
     }
     const target = event.target;
     if (!(target instanceof Element)) {
-      this.debugLog("touchstart ignored: the target is not an element");
       return;
     }
     const selection = window.getSelection();
     if (selection !== null && !selection.isCollapsed) {
-      this.debugLog("touchstart ignored: there is a text selection");
       return;
     }
     const view = this.findSourceMarkdownView(target);
     if (view === null) {
-      this.debugLog(`touchstart ignored: no editable source view under ${describeElement(target)}`);
       return;
     }
-    this.debugLog(`touchstart at (${Math.round(touch.clientX)}, ${Math.round(touch.clientY)}) on ${describeElement(target)}`);
     this.gesture = {
       touchId: touch.identifier,
       startX: touch.clientX,
@@ -876,30 +855,19 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   onTouchMove(event) {
     const gesture = this.gesture;
     if (gesture === null || gesture.released) {
-      this.debugLog("touchmove ignored: no live gesture");
       return;
     }
     const touch = touchById(event.changedTouches, gesture.touchId);
-    if (gesture.claimedMoves === 0) {
-      const first = touch === null ? null : touchById(event.changedTouches, gesture.touchId);
-      this.debugLog(
-        first === null ? "first touchmove: the finger is not in changedTouches" : `first touchmove: dx ${Math.round(first.clientX - gesture.startX)} px, dy ${Math.round(first.clientY - gesture.startY)} px`
-      );
-    }
     if (touch === null) {
       return;
     }
-    const threshold = this.settings.swipeThresholdPx;
     if (gesture.claimed) {
       this.swallowTouch(event);
       gesture.claimedMoves += 1;
       const deltaX2 = touch.clientX - gesture.startX;
       gesture.lastDeltaX = deltaX2;
       this.feedCut(gesture, deltaX2);
-      if (!gesture.consumed && deltaX2 >= threshold) {
-        gesture.consumed = true;
-        this.openPickerSafely(gesture);
-      }
+      this.consumeAtThreshold(gesture, deltaX2);
       return;
     }
     if (event.touches.length !== 1) {
@@ -922,11 +890,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     gesture.claimed = true;
     this.swallowTouch(event);
     this.debugLog(`swipe claimed (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px)`);
-    this.debugLog(`claimed at dx ${Math.round(deltaX)} px`);
-    if (deltaX >= threshold) {
-      gesture.consumed = true;
-      this.openPickerSafely(gesture);
-    }
+    this.consumeAtThreshold(gesture, deltaX);
   }
   onTouchEnd(event) {
     const gesture = this.gesture;
@@ -945,12 +909,10 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       this.swallowTouch(event);
       if (gesture.consumed) {
         this.dropCut();
-      } else if (deltaX >= this.settings.swipeThresholdPx) {
-        gesture.consumed = true;
+      } else if (this.consumeAtThreshold(gesture, deltaX)) {
         this.debugLog(
-          `opening the picker from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`
+          `the picker opened from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`
         );
-        this.openPickerSafely(gesture);
       } else {
         this.debugLog(
           `swipe ended below the threshold (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px, threshold ${this.settings.swipeThresholdPx} px, ${gesture.claimedMoves} move event(s) received)`
@@ -993,13 +955,26 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     event.stopImmediatePropagation();
     event.preventDefault();
   }
+  /**
+   * The claim moment and every later touchmove re-check the threshold, and
+   * touchend checks it once more (some WebView builds stop delivering
+   * touchmove events once a gesture is claimed). Fires at most once.
+   */
+  consumeAtThreshold(gesture, deltaX) {
+    if (gesture.consumed || deltaX < this.settings.swipeThresholdPx) {
+      return false;
+    }
+    gesture.consumed = true;
+    this.openPickerSafely(gesture);
+    return true;
+  }
   /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
   openPickerSafely(gesture) {
     this.detachCut();
     try {
       this.triggerSwipe(gesture);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = describeError(error);
       console.error("Paragraph Swipe: failed to open the picker", error);
       new import_obsidian3.Notice(`Paragraph Swipe: internal error \u2014 ${message}`);
     }
@@ -1036,7 +1011,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
         }
         this.startCut(gesture, deltaX);
       } else {
-        this.updateCut(deltaX);
+        this.carryCut(deltaX);
       }
     } catch (error) {
       gesture.effectBroken = true;
@@ -1077,19 +1052,19 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       return;
     }
     this.cut = cut;
-    cut.setShift(deltaX);
-    cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+    this.carryCut(deltaX);
     this.debugLog(
       `the block on lines ${lookup.range.start + 1}\u2013${lookup.range.end} was cut out (${lookup.strategy})`
     );
   }
   /** Carries the block to the finger's position. A no-op without one. */
-  updateCut(deltaX) {
-    if (this.cut === null) {
+  carryCut(deltaX) {
+    const cut = this.cut;
+    if (cut === null) {
       return;
     }
-    this.cut.setShift(deltaX);
-    this.cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+    cut.setShift(deltaX);
+    cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
   }
   /** The swipe was abandoned: the block glides back into its slot. */
   releaseCut() {
@@ -1109,17 +1084,14 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     this.cut = null;
     cut == null ? void 0 : cut.drop();
   }
-  /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
+  /** Runtime probe: `leftSplit` differs between typings releases. */
+  leftSplit() {
+    const leftSplit = readProperty(this.app.workspace, "leftSplit");
+    return typeof leftSplit === "object" && leftSplit !== null ? leftSplit : null;
+  }
   isLeftDrawerOpen() {
-    const workspace = this.app.workspace;
-    if (typeof workspace !== "object" || workspace === null) {
-      return false;
-    }
-    const leftSplit = workspace["leftSplit"];
-    if (typeof leftSplit !== "object" || leftSplit === null) {
-      return false;
-    }
-    return leftSplit["collapsed"] === false;
+    const leftSplit = this.leftSplit();
+    return leftSplit !== null && readProperty(leftSplit, "collapsed") === false;
   }
   /**
    * Safety net: if the drawer gesture still managed to open the left sidebar
@@ -1131,16 +1103,12 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     if (gesture.leftDrawerOpenAtStart || !this.isLeftDrawerOpen()) {
       return;
     }
-    const workspace = this.app.workspace;
-    if (typeof workspace !== "object" || workspace === null) {
+    const leftSplit = this.leftSplit();
+    if (leftSplit === null) {
       return;
     }
-    const leftSplit = workspace["leftSplit"];
-    if (typeof leftSplit !== "object" || leftSplit === null) {
-      return;
-    }
-    const collapse = leftSplit["collapse"];
-    if (typeof collapse === "function") {
+    const collapse = readFunction(leftSplit, "collapse");
+    if (collapse !== null) {
       collapse.call(leftSplit);
     }
   }
@@ -1166,15 +1134,10 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
    * a fresh lookup for the rare flick that never got far enough to start one.
    */
   paragraphOf(gesture) {
-    if (gesture.paragraph === null) {
-      return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
+    if (gesture.paragraph !== null) {
+      return { kind: "paragraph", ...gesture.paragraph };
     }
-    return {
-      kind: "paragraph",
-      range: gesture.paragraph.range,
-      line: gesture.paragraph.line,
-      strategy: gesture.paragraph.strategy
-    };
+    return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
   }
   /** Opens the note picker for the paragraph this gesture started on. */
   triggerSwipe(gesture) {
@@ -1204,7 +1167,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     const startLine = lookup.range.start;
     const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile) => {
       void this.moveParagraph(view, startLine, targetFile).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = describeError(error);
         new import_obsidian3.Notice(`Paragraph Swipe: failed to move the paragraph \u2014 ${message}`);
       });
     });
@@ -1230,7 +1193,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
         (data) => appendParagraphToText(normalizeLineEndings(data), paragraph)
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = describeError(error);
       new import_obsidian3.Notice(`Paragraph Swipe: could not update "${targetFile.basename}" \u2014 ${message}`);
       return;
     }

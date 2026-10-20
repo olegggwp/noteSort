@@ -1,27 +1,24 @@
 import { App, SuggestModal, TFile } from "obsidian";
 
-import { filterAndSortNotes, parentFolderPath, type NoteCandidate } from "./lib/notes-search";
+import { filterAndSortNotes, parentFolderPath } from "./lib/notes-search";
 
 /**
  * Compact note picker: lists every markdown note except the source note,
  * sorted by last modification (newest first), with a search field.
  */
 export class NotePickerModal extends SuggestModal<TFile> {
-    private readonly candidates: readonly TFile[];
-    private readonly filesByPath: ReadonlyMap<string, TFile>;
+    /** Candidates with the fields the sorting needs, paired with their file. */
+    private readonly candidates: readonly { file: TFile; path: string; mtime: number }[];
     private readonly onPick: (file: TFile) => void;
 
     constructor(app: App, sourcePath: string, onPick: (file: TFile) => void) {
         super(app);
         this.onPick = onPick;
 
-        const files = app.vault.getMarkdownFiles().filter((file) => file.path !== sourcePath);
-        this.candidates = files;
-        const filesByPath = new Map<string, TFile>();
-        for (const file of files) {
-            filesByPath.set(file.path, file);
-        }
-        this.filesByPath = filesByPath;
+        this.candidates = app.vault
+            .getMarkdownFiles()
+            .filter((file) => file.path !== sourcePath)
+            .map((file) => ({ file, path: file.path, mtime: file.stat.mtime }));
 
         this.modalEl.addClass("paragraph-swipe-modal");
         this.emptyStateText = "No notes found.";
@@ -33,19 +30,7 @@ export class NotePickerModal extends SuggestModal<TFile> {
     }
 
     public getSuggestions(query: string): TFile[] {
-        const notes: NoteCandidate[] = this.candidates.map((file) => ({
-            path: file.path,
-            mtime: file.stat.mtime,
-        }));
-        const matches = filterAndSortNotes(notes, query);
-        const suggestions: TFile[] = [];
-        for (const match of matches) {
-            const file = this.filesByPath.get(match.path);
-            if (file !== undefined) {
-                suggestions.push(file);
-            }
-        }
-        return suggestions;
+        return filterAndSortNotes(this.candidates, query).map((entry) => entry.file);
     }
 
     public renderSuggestion(file: TFile, el: HTMLElement): void {

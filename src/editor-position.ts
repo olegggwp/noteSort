@@ -143,22 +143,6 @@ export function posAtClientPoint(editor: Editor, x: number, y: number): Resolved
 }
 
 /**
- * What every strategy separately has to say about one point, for the debug
- * notice: a failing paragraph lookup must show which resolver disagrees.
- */
-export function describePositionAttempt(editor: Editor, x: number, y: number): string {
-    const asLine = (pos: { line: number; ch: number } | null): string =>
-        pos === null ? "none" : `line ${pos.line + 1} ch ${pos.ch}`;
-    const point: ScreenPoint = { x, y };
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-        return "invalid point";
-    }
-    return `wrapper=${asLine(posFromEditorWrapper(editor, point))}, cm=${asLine(posFromCodeMirrorView(editor, point))}, scan=${asLine(
-        posFromLineScan(editor, y),
-    )}, doc=${editor.lineCount()} lines`;
-}
-
-/**
  * Human-readable availability of the runtime members the strategies rely on;
  * used by the debug notices to diagnose position-resolution failures.
  */

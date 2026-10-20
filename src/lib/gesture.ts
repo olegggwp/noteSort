@@ -55,7 +55,6 @@ export function decisionDistancePx(startX: number): number {
     return isDrawerZoneStart(startX) ? 1 : DECISION_DISTANCE_PX;
 }
 
-
 /**
  * How much of the swipe is done, clamped to 0..1.
  *

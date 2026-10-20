@@ -118,22 +118,6 @@ export function toCharRange(lines: readonly string[], deletion: ParagraphRange):
 }
 
 /**
- * Removes the paragraph at `lineIndex` from `text` (with the same blank-line
- * cleanup as `getDeletionRange`). Returns null if there is no paragraph at
- * that line.
- */
-export function removeParagraphFromText(text: string, lineIndex: number): string | null {
-    const lines = splitLines(text);
-    const range = getParagraphRange(lines, lineIndex);
-    if (range === null) {
-        return null;
-    }
-    const deletion = getDeletionRange(lines, range);
-    const remaining = lines.slice(0, deletion.start).concat(lines.slice(deletion.end));
-    return joinLines(remaining);
-}
-
-/**
  * Appends `paragraph` to the end of `target`, separated by exactly one empty
  * line. Trailing blank lines of the target are normalized into that single
  * separator; a trailing newline of the target is preserved. If the target is

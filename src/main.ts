@@ -13,16 +13,15 @@ import {
     toCharRange,
 } from "./lib/paragraph";
 import type { ParagraphRange } from "./lib/paragraph";
+import { readFunction, readProperty } from "./lib/runtime-probe";
 import { NotePickerModal } from "./note-picker-modal";
 import { clampSwipeThreshold, DEFAULT_SETTINGS, ParagraphSwipeSettingTab } from "./settings";
 import type { ParagraphSwipeSettings } from "./settings";
 import { SwipeCut } from "./swipe-cut";
 
-/** A short description of an event target, for the debug log. */
-function describeElement(element: Element): string {
-    const id = element.id === "" ? "" : `#${element.id}`;
-    const classes = element.className === "" ? "" : `.${String(element.className).trim().split(/\s+/).join(".")}`;
-    return `${element.tagName.toLowerCase()}${id}${classes}`.slice(0, 60);
+/** Human-readable message of an unknown thrown value. */
+function describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 /** A paragraph found under a viewport point, and how it was found. */
@@ -229,25 +228,20 @@ export default class ParagraphSwipePlugin extends Plugin {
         this.dropCut();
         const touch = event.touches[0];
         if (event.touches.length !== 1 || touch === undefined) {
-            this.debugLog(`touchstart ignored: ${event.touches.length} finger(s)`);
             return;
         }
         const target = event.target;
         if (!(target instanceof Element)) {
-            this.debugLog("touchstart ignored: the target is not an element");
             return;
         }
         const selection = window.getSelection();
         if (selection !== null && !selection.isCollapsed) {
-            this.debugLog("touchstart ignored: there is a text selection");
             return; // an active text selection: leave handle dragging to the app
         }
         const view = this.findSourceMarkdownView(target);
         if (view === null) {
-            this.debugLog(`touchstart ignored: no editable source view under ${describeElement(target)}`);
             return;
         }
-        this.debugLog(`touchstart at (${Math.round(touch.clientX)}, ${Math.round(touch.clientY)}) on ${describeElement(target)}`);
         this.gesture = {
             touchId: touch.identifier,
             startX: touch.clientX,
@@ -268,23 +262,12 @@ export default class ParagraphSwipePlugin extends Plugin {
     private onTouchMove(event: TouchEvent): void {
         const gesture = this.gesture;
         if (gesture === null || gesture.released) {
-            this.debugLog("touchmove ignored: no live gesture");
             return;
         }
         const touch = touchById(event.changedTouches, gesture.touchId);
-        if (gesture.claimedMoves === 0) {
-            const first = touch === null ? null : touchById(event.changedTouches, gesture.touchId);
-            this.debugLog(
-                first === null
-                    ? "first touchmove: the finger is not in changedTouches"
-                    : `first touchmove: dx ${Math.round(first.clientX - gesture.startX)} px, dy ${Math.round(first.clientY - gesture.startY)} px`,
-            );
-        }
         if (touch === null) {
             return;
         }
-        const threshold = this.settings.swipeThresholdPx;
-
         if (gesture.claimed) {
             // Keep swallowing regardless of the number of active touches: a
             // claimed gesture must run to completion even if a palm touch lands.
@@ -293,10 +276,7 @@ export default class ParagraphSwipePlugin extends Plugin {
             const deltaX = touch.clientX - gesture.startX;
             gesture.lastDeltaX = deltaX;
             this.feedCut(gesture, deltaX);
-            if (!gesture.consumed && deltaX >= threshold) {
-                gesture.consumed = true;
-                this.openPickerSafely(gesture);
-            }
+            this.consumeAtThreshold(gesture, deltaX);
             return;
         }
 
@@ -332,11 +312,7 @@ export default class ParagraphSwipePlugin extends Plugin {
         gesture.claimed = true;
         this.swallowTouch(event);
         this.debugLog(`swipe claimed (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px)`);
-        this.debugLog(`claimed at dx ${Math.round(deltaX)} px`);
-        if (deltaX >= threshold) {
-            gesture.consumed = true;
-            this.openPickerSafely(gesture);
-        }
+        this.consumeAtThreshold(gesture, deltaX);
     }
 
     private onTouchEnd(event: TouchEvent): void {
@@ -359,14 +335,10 @@ export default class ParagraphSwipePlugin extends Plugin {
             if (gesture.consumed) {
                 // The picker is open: the paragraph is already gone from here.
                 this.dropCut();
-            } else if (deltaX >= this.settings.swipeThresholdPx) {
-                // Some WebView builds stop delivering touchmove events once a
-                // gesture is claimed, so the threshold is re-checked here.
-                gesture.consumed = true;
+            } else if (this.consumeAtThreshold(gesture, deltaX)) {
                 this.debugLog(
-                    `opening the picker from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`,
+                    `the picker opened from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`,
                 );
-                this.openPickerSafely(gesture);
             } else {
                 this.debugLog(
                     `swipe ended below the threshold (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px, threshold ${this.settings.swipeThresholdPx} px, ${gesture.claimedMoves} move event(s) received)`,
@@ -419,13 +391,27 @@ export default class ParagraphSwipePlugin extends Plugin {
         event.preventDefault();
     }
 
+    /**
+     * The claim moment and every later touchmove re-check the threshold, and
+     * touchend checks it once more (some WebView builds stop delivering
+     * touchmove events once a gesture is claimed). Fires at most once.
+     */
+    private consumeAtThreshold(gesture: TouchGesture, deltaX: number): boolean {
+        if (gesture.consumed || deltaX < this.settings.swipeThresholdPx) {
+            return false;
+        }
+        gesture.consumed = true;
+        this.openPickerSafely(gesture);
+        return true;
+    }
+
     /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
     private openPickerSafely(gesture: TouchGesture): void {
         this.detachCut(); // the block leaves the note for good
         try {
             this.triggerSwipe(gesture);
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = describeError(error);
             console.error("Paragraph Swipe: failed to open the picker", error);
             new Notice(`Paragraph Swipe: internal error — ${message}`);
         }
@@ -467,7 +453,7 @@ export default class ParagraphSwipePlugin extends Plugin {
                 }
                 this.startCut(gesture, deltaX);
             } else {
-                this.updateCut(deltaX);
+                this.carryCut(deltaX);
             }
         } catch (error) {
             gesture.effectBroken = true;
@@ -511,20 +497,20 @@ export default class ParagraphSwipePlugin extends Plugin {
             return;
         }
         this.cut = cut;
-        cut.setShift(deltaX);
-        cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+        this.carryCut(deltaX);
         this.debugLog(
             `the block on lines ${lookup.range.start + 1}–${lookup.range.end} was cut out (${lookup.strategy})`,
         );
     }
 
     /** Carries the block to the finger's position. A no-op without one. */
-    private updateCut(deltaX: number): void {
-        if (this.cut === null) {
+    private carryCut(deltaX: number): void {
+        const cut = this.cut;
+        if (cut === null) {
             return;
         }
-        this.cut.setShift(deltaX);
-        this.cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
+        cut.setShift(deltaX);
+        cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
     }
 
     /** The swipe was abandoned: the block glides back into its slot. */
@@ -548,17 +534,15 @@ export default class ParagraphSwipePlugin extends Plugin {
         cut?.drop();
     }
 
-    /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
+    /** Runtime probe: `leftSplit` differs between typings releases. */
+    private leftSplit(): object | null {
+        const leftSplit = readProperty(this.app.workspace, "leftSplit");
+        return typeof leftSplit === "object" && leftSplit !== null ? leftSplit : null;
+    }
+
     private isLeftDrawerOpen(): boolean {
-        const workspace: unknown = this.app.workspace;
-        if (typeof workspace !== "object" || workspace === null) {
-            return false;
-        }
-        const leftSplit = (workspace as Record<string, unknown>)["leftSplit"];
-        if (typeof leftSplit !== "object" || leftSplit === null) {
-            return false;
-        }
-        return (leftSplit as Record<string, unknown>)["collapsed"] === false;
+        const leftSplit = this.leftSplit();
+        return leftSplit !== null && readProperty(leftSplit, "collapsed") === false;
     }
 
     /**
@@ -571,17 +555,13 @@ export default class ParagraphSwipePlugin extends Plugin {
         if (gesture.leftDrawerOpenAtStart || !this.isLeftDrawerOpen()) {
             return;
         }
-        const workspace: unknown = this.app.workspace;
-        if (typeof workspace !== "object" || workspace === null) {
+        const leftSplit = this.leftSplit();
+        if (leftSplit === null) {
             return;
         }
-        const leftSplit = (workspace as Record<string, unknown>)["leftSplit"];
-        if (typeof leftSplit !== "object" || leftSplit === null) {
-            return;
-        }
-        const collapse = (leftSplit as Record<string, unknown>)["collapse"];
-        if (typeof collapse === "function") {
-            (collapse as (...args: unknown[]) => unknown).call(leftSplit);
+        const collapse = readFunction(leftSplit, "collapse");
+        if (collapse !== null) {
+            collapse.call(leftSplit);
         }
     }
 
@@ -608,15 +588,10 @@ export default class ParagraphSwipePlugin extends Plugin {
      * a fresh lookup for the rare flick that never got far enough to start one.
      */
     private paragraphOf(gesture: TouchGesture): ParagraphLookup {
-        if (gesture.paragraph === null) {
-            return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
+        if (gesture.paragraph !== null) {
+            return { kind: "paragraph", ...gesture.paragraph };
         }
-        return {
-            kind: "paragraph",
-            range: gesture.paragraph.range,
-            line: gesture.paragraph.line,
-            strategy: gesture.paragraph.strategy,
-        };
+        return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
     }
 
     /** Opens the note picker for the paragraph this gesture started on. */
@@ -647,7 +622,7 @@ export default class ParagraphSwipePlugin extends Plugin {
         const startLine = lookup.range.start;
         const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile: TFile) => {
             void this.moveParagraph(view, startLine, targetFile).catch((error: unknown) => {
-                const message = error instanceof Error ? error.message : String(error);
+                const message = describeError(error);
                 new Notice(`Paragraph Swipe: failed to move the paragraph — ${message}`);
             });
         });
@@ -676,7 +651,7 @@ export default class ParagraphSwipePlugin extends Plugin {
                 appendParagraphToText(normalizeLineEndings(data), paragraph),
             );
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = describeError(error);
             new Notice(`Paragraph Swipe: could not update "${targetFile.basename}" — ${message}`);
             return;
         }

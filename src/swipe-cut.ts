@@ -78,6 +78,12 @@ function clampProgress(value: number): number {
     return Math.min(1, Math.max(0, value));
 }
 
+/** The CodeMirror content element of the view, or null when there is none. */
+function contentElement(view: MarkdownView): HTMLElement | null {
+    const content = view.contentEl.querySelector(".cm-content");
+    return content instanceof HTMLElement ? content : null;
+}
+
 /** The editor's own root element; carries the state of the running cut. */
 function editorRoot(view: MarkdownView): HTMLElement {
     const cm = readProperty(view.editor, "cm");
@@ -87,8 +93,7 @@ function editorRoot(view: MarkdownView): HTMLElement {
             return dom;
         }
     }
-    const content = view.contentEl.querySelector(".cm-content");
-    return content instanceof HTMLElement ? content : view.contentEl;
+    return contentElement(view) ?? view.contentEl;
 }
 
 /**
@@ -129,8 +134,8 @@ function paragraphLines(
     probeX: number,
     probeY: number,
 ): readonly HTMLElement[] | LocateFailure {
-    const container = view.contentEl.querySelector(".cm-content");
-    if (!(container instanceof HTMLElement)) {
+    const container = contentElement(view);
+    if (container === null) {
         return "no-lines";
     }
     const lines = Array.from(container.querySelectorAll<HTMLElement>(".cm-line"));
