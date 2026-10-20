@@ -122,19 +122,40 @@ export function posAtClientPoint(editor: Editor, x: number, y: number): Resolved
         return null;
     }
     const point: ScreenPoint = { x, y };
-    const fromWrapper = posFromEditorWrapper(editor, point);
-    if (fromWrapper !== null) {
-        return { position: fromWrapper, strategy: "editor.posAtCoords" };
-    }
+    // CodeMirror first: on the phone the plugin build that shipped 2.1.0
+    // resolved every swipe deep inside a long note to a line near the top
+    // ("the swipe started on a blank line (line 90, via editor.posAtCoords)"),
+    // so the wrapper's posAtCoords must not win; the forwarder view resolves
+    // what the rendered viewport actually shows.
     const fromCodeMirror = posFromCodeMirrorView(editor, point);
     if (fromCodeMirror !== null) {
         return { position: fromCodeMirror, strategy: "editor.cm.posAtCoords" };
+    }
+    const fromWrapper = posFromEditorWrapper(editor, point);
+    if (fromWrapper !== null) {
+        return { position: fromWrapper, strategy: "editor.posAtCoords" };
     }
     const fromScan = posFromLineScan(editor, y);
     if (fromScan !== null) {
         return { position: fromScan, strategy: "coordsAtPos line scan" };
     }
     return null;
+}
+
+/**
+ * What every strategy separately has to say about one point, for the debug
+ * notice: a failing paragraph lookup must show which resolver disagrees.
+ */
+export function describePositionAttempt(editor: Editor, x: number, y: number): string {
+    const asLine = (pos: { line: number; ch: number } | null): string =>
+        pos === null ? "none" : `line ${pos.line + 1} ch ${pos.ch}`;
+    const point: ScreenPoint = { x, y };
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return "invalid point";
+    }
+    return `wrapper=${asLine(posFromEditorWrapper(editor, point))}, cm=${asLine(posFromCodeMirrorView(editor, point))}, scan=${asLine(
+        posFromLineScan(editor, y),
+    )}, doc=${editor.lineCount()} lines`;
 }
 
 /**

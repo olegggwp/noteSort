@@ -179,13 +179,13 @@ function posAtClientPoint(editor, x, y) {
     return null;
   }
   const point = { x, y };
-  const fromWrapper = posFromEditorWrapper(editor, point);
-  if (fromWrapper !== null) {
-    return { position: fromWrapper, strategy: "editor.posAtCoords" };
-  }
   const fromCodeMirror = posFromCodeMirrorView(editor, point);
   if (fromCodeMirror !== null) {
     return { position: fromCodeMirror, strategy: "editor.cm.posAtCoords" };
+  }
+  const fromWrapper = posFromEditorWrapper(editor, point);
+  if (fromWrapper !== null) {
+    return { position: fromWrapper, strategy: "editor.posAtCoords" };
   }
   const fromScan = posFromLineScan(editor, y);
   if (fromScan !== null) {
