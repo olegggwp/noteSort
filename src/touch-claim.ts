@@ -1,7 +1,7 @@
 import { App, MarkdownView } from "obsidian";
 
 import { decideGesture, decisionDistancePx, isRightwardSwipe, touchById } from "./lib/gesture";
-import { readFunction, readObject } from "./lib/runtime-probe";
+import { readElement, readFunction, readObject } from "./lib/runtime-probe";
 
 /**
  * The claim part of the swipe pipeline: observe raw touch events, recognize a
@@ -24,6 +24,9 @@ export interface SwipeGesture {
     readonly startX: number;
     readonly startY: number;
 }
+
+/** Freezes the left drawer's own drag gesture while a claimed swipe runs. */
+const DRAWER_FROZEN_CLASS = "paragraph-swipe-drawer-frozen";
 
 export interface TouchClaimHandlers {
     /** The editable source-mode view containing the element, or null. */
@@ -58,6 +61,8 @@ interface GestureState extends SwipeGesture {
 
 export class TouchClaimTracker {
     private gesture: GestureState | null = null;
+    /** The drawer element frozen during a claimed swipe, for restoring. */
+    private disarmedDrawer: HTMLElement | null = null;
 
     constructor(
         private readonly app: App,
@@ -156,6 +161,7 @@ export class TouchClaimTracker {
         // the built-in drawer gesture reacts, wherever the touch started.
         gesture.claimed = true;
         this.swallow(event);
+        this.disarmDrawerGesture();
         if (deltaX >= threshold) {
             gesture.accepted = true;
             this.handlers.onAccepted(gesture);
@@ -163,6 +169,7 @@ export class TouchClaimTracker {
     }
 
     public onTouchEnd(event: TouchEvent): void {
+        this.rearmDrawerGesture();
         const gesture = this.gesture;
         if (gesture === null) {
             return;
@@ -212,6 +219,7 @@ export class TouchClaimTracker {
     }
 
     public onTouchCancel(event: TouchEvent): void {
+        this.rearmDrawerGesture();
         const gesture = this.gesture;
         this.gesture = null;
         if (gesture === null) {
@@ -261,5 +269,35 @@ export class TouchClaimTracker {
         if (collapse !== null) {
             collapse.call(leftSplit);
         }
+    }
+
+    /** The left drawer element, probed structurally. */
+    private drawerElement(): HTMLElement | null {
+        const leftSplit = readObject(this.app.workspace, "leftSplit");
+        return leftSplit === null ? null : readElement(leftSplit, "containerEl");
+    }
+
+    /**
+     * Freezes the left drawer's own touch gesture for the duration of a
+     * claimed swipe: its handlers sit on the drawer element itself and are fed
+     * by the pointer channel, which a claimed touchmove cannot stop (pointer
+     * events are generated independently of the swallowed ones). With
+     * `pointer-events: none` the panel cannot even begin to follow the
+     * finger, so there is never a "peek" for the collapse safety net to
+     * animate back afterwards.
+     */
+    private disarmDrawerGesture(): void {
+        const drawer = this.drawerElement();
+        if (drawer === null) {
+            return;
+        }
+        this.disarmedDrawer = drawer;
+        drawer.classList.add(DRAWER_FROZEN_CLASS);
+    }
+
+    /** Releases the freeze once the claimed gesture is over. */
+    private rearmDrawerGesture(): void {
+        this.disarmedDrawer?.classList.remove(DRAWER_FROZEN_CLASS);
+        this.disarmedDrawer = null;
     }
 }

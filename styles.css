@@ -159,3 +159,11 @@
         opacity: 0;
     }
 }
+
+/* While a claimed swipe runs, the left drawer's own drag gesture must not
+   follow the finger: its handlers are fed by the pointer channel, which a
+   swallowed touchmove cannot stop. The freeze is removed on touchend and
+   touchcancel. */
+.paragraph-swipe-drawer-frozen {
+    pointer-events: none;
+}

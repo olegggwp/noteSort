@@ -583,6 +583,7 @@ function paragraphLines(view, range, fingerLine, probeX, probeY) {
   const from = Math.max(0, fingerIndex - (fingerLine - range.start));
   return lines.slice(from, Math.min(from + count, lines.length));
 }
+var OVERLAY_PAD_PX = 8;
 function unionRect(elements) {
   let top = Number.POSITIVE_INFINITY;
   let bottom = Number.NEGATIVE_INFINITY;
@@ -603,7 +604,7 @@ function unionRect(elements) {
   if (visibleBottom <= visibleTop || right <= left) {
     return null;
   }
-  return { top: visibleTop, bottom: visibleBottom, left, right };
+  return { top: visibleTop, bottom: visibleBottom, left: left - OVERLAY_PAD_PX, right: right + OVERLAY_PAD_PX };
 }
 function appendOverlay(cls, rect) {
   const element = createEl("div", { cls });
@@ -724,12 +725,15 @@ var SwipeCut = class _SwipeCut {
 };
 
 // src/touch-claim.ts
+var DRAWER_FROZEN_CLASS = "paragraph-swipe-drawer-frozen";
 var TouchClaimTracker = class {
   constructor(app, thresholdPx, handlers) {
     this.app = app;
     this.thresholdPx = thresholdPx;
     this.handlers = handlers;
     this.gesture = null;
+    /** The drawer element frozen during a claimed swipe, for restoring. */
+    this.disarmedDrawer = null;
   }
   onTouchStart(event) {
     var _a;
@@ -809,12 +813,14 @@ var TouchClaimTracker = class {
     }
     gesture.claimed = true;
     this.swallow(event);
+    this.disarmDrawerGesture();
     if (deltaX >= threshold) {
       gesture.accepted = true;
       this.handlers.onAccepted(gesture);
     }
   }
   onTouchEnd(event) {
+    this.rearmDrawerGesture();
     const gesture = this.gesture;
     if (gesture === null) {
       return;
@@ -851,6 +857,7 @@ var TouchClaimTracker = class {
     }
   }
   onTouchCancel(event) {
+    this.rearmDrawerGesture();
     const gesture = this.gesture;
     this.gesture = null;
     if (gesture === null) {
@@ -896,6 +903,34 @@ var TouchClaimTracker = class {
     if (collapse !== null) {
       collapse.call(leftSplit);
     }
+  }
+  /** The left drawer element, probed structurally. */
+  drawerElement() {
+    const leftSplit = readObject(this.app.workspace, "leftSplit");
+    return leftSplit === null ? null : readElement(leftSplit, "containerEl");
+  }
+  /**
+   * Freezes the left drawer's own touch gesture for the duration of a
+   * claimed swipe: its handlers sit on the drawer element itself and are fed
+   * by the pointer channel, which a claimed touchmove cannot stop (pointer
+   * events are generated independently of the swallowed ones). With
+   * `pointer-events: none` the panel cannot even begin to follow the
+   * finger, so there is never a "peek" for the collapse safety net to
+   * animate back afterwards.
+   */
+  disarmDrawerGesture() {
+    const drawer = this.drawerElement();
+    if (drawer === null) {
+      return;
+    }
+    this.disarmedDrawer = drawer;
+    drawer.classList.add(DRAWER_FROZEN_CLASS);
+  }
+  /** Releases the freeze once the claimed gesture is over. */
+  rearmDrawerGesture() {
+    var _a;
+    (_a = this.disarmedDrawer) == null ? void 0 : _a.classList.remove(DRAWER_FROZEN_CLASS);
+    this.disarmedDrawer = null;
   }
 };
 

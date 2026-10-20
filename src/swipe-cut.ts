@@ -141,9 +141,14 @@ function paragraphLines(
     return lines.slice(from, Math.min(from + count, lines.length));
 }
 
+/** Horizontal padding (px) of the overlays: the slot and the glow start a little outside the text. */
+const OVERLAY_PAD_PX = 8;
+
 /**
  * The box around every given element, clamped to the viewport: a paragraph
- * taller than the screen contributes only the part that can be seen.
+ * taller than the screen contributes only the part that can be seen. Widened
+ * by `OVERLAY_PAD_PX` on both sides, so the glow and the dashed slot begin a
+ * little to the left and right of the text instead of exactly on its edge.
  */
 function unionRect(elements: readonly HTMLElement[]): SwipeRect | null {
     let top = Number.POSITIVE_INFINITY;
@@ -165,7 +170,7 @@ function unionRect(elements: readonly HTMLElement[]): SwipeRect | null {
     if (visibleBottom <= visibleTop || right <= left) {
         return null;
     }
-    return { top: visibleTop, bottom: visibleBottom, left, right };
+    return { top: visibleTop, bottom: visibleBottom, left: left - OVERLAY_PAD_PX, right: right + OVERLAY_PAD_PX };
 }
 
 /** Appends a fixed-position box to the document body. */
