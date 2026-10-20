@@ -13,7 +13,7 @@ import {
     toCharRange,
 } from "./lib/paragraph";
 import type { ParagraphRange } from "./lib/paragraph";
-import { readFunction, readProperty } from "./lib/runtime-probe";
+import { isObject, readFunction, readObject } from "./lib/runtime-probe";
 import { NotePickerModal } from "./note-picker-modal";
 import { clampSwipeThreshold, DEFAULT_SETTINGS, ParagraphSwipeSettingTab } from "./settings";
 import type { ParagraphSwipeSettings } from "./settings";
@@ -174,16 +174,15 @@ export default class ParagraphSwipePlugin extends Plugin {
     private async loadSettings(): Promise<void> {
         const stored: unknown = await this.loadData();
         this.settings = { ...DEFAULT_SETTINGS };
-        if (typeof stored !== "object" || stored === null) {
+        if (!isObject(stored)) {
             return;
         }
-        const record = stored as Record<string, unknown>;
-        const threshold = record["swipeThresholdPx"];
+        const threshold = stored["swipeThresholdPx"];
         if (typeof threshold === "number" && Number.isFinite(threshold)) {
             this.settings.swipeThresholdPx = clampSwipeThreshold(threshold);
         }
-        if (typeof record["debugMode"] === "boolean") {
-            this.settings.debugMode = record["debugMode"];
+        if (typeof stored["debugMode"] === "boolean") {
+            this.settings.debugMode = stored["debugMode"];
         }
     }
 
@@ -534,15 +533,9 @@ export default class ParagraphSwipePlugin extends Plugin {
         cut?.drop();
     }
 
-    /** Runtime probe: `leftSplit` differs between typings releases. */
-    private leftSplit(): object | null {
-        const leftSplit = readProperty(this.app.workspace, "leftSplit");
-        return typeof leftSplit === "object" && leftSplit !== null ? leftSplit : null;
-    }
-
+    /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
     private isLeftDrawerOpen(): boolean {
-        const leftSplit = this.leftSplit();
-        return leftSplit !== null && readProperty(leftSplit, "collapsed") === false;
+        return readObject(this.app.workspace, "leftSplit")?.collapsed === false;
     }
 
     /**
@@ -555,7 +548,7 @@ export default class ParagraphSwipePlugin extends Plugin {
         if (gesture.leftDrawerOpenAtStart || !this.isLeftDrawerOpen()) {
             return;
         }
-        const leftSplit = this.leftSplit();
+        const leftSplit = readObject(this.app.workspace, "leftSplit");
         if (leftSplit === null) {
             return;
         }

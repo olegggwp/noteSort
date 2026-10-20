@@ -1,7 +1,7 @@
 import { Editor, EditorPosition } from "obsidian";
 
 import { findLineIndexAtY, findVisibleLineIndexAtY, type VerticalBounds } from "./lib/coords";
-import { readFunction, readNumber, readProperty, safely } from "./lib/runtime-probe";
+import { isObject, readFunction, readNumber, readObject, safely } from "./lib/runtime-probe";
 
 /**
  * Screen-point to editor-position mapping.
@@ -38,12 +38,11 @@ export interface ResolvedPosition {
 
 /** Validates an unknown value as an editor position. */
 function asEditorPosition(value: unknown): EditorPosition | null {
-    if (typeof value !== "object" || value === null) {
+    if (!isObject(value)) {
         return null;
     }
-    const record = value as Record<string, unknown>;
-    const line = record["line"];
-    const ch = record["ch"];
+    const line = value["line"];
+    const ch = value["ch"];
     if (typeof line !== "number" || !Number.isInteger(line) || line < 0) {
         return null;
     }
@@ -55,12 +54,11 @@ function asEditorPosition(value: unknown): EditorPosition | null {
 
 /** Validates an unknown value as a vertical bounding box. */
 function asVerticalBounds(value: unknown): VerticalBounds | null {
-    if (typeof value !== "object" || value === null) {
+    if (!isObject(value)) {
         return null;
     }
-    const record = value as Record<string, unknown>;
-    const top = record["top"];
-    const bottom = record["bottom"];
+    const top = value["top"];
+    const bottom = value["bottom"];
     if (typeof top !== "number" || typeof bottom !== "number" || !Number.isFinite(top) || !Number.isFinite(bottom)) {
         return null;
     }
@@ -76,8 +74,8 @@ function posFromEditorWrapper(editor: Editor, point: ScreenPoint): EditorPositio
 }
 
 function posFromCodeMirrorView(editor: Editor, point: ScreenPoint): EditorPosition | null {
-    const cmView = readProperty(editor, "cm");
-    if (typeof cmView !== "object" || cmView === null) {
+    const cmView = readObject(editor, "cm");
+    if (cmView === null) {
         return null;
     }
     const posAtCoords = readFunction(cmView, "posAtCoords");
@@ -148,16 +146,15 @@ export function posAtClientPoint(editor: Editor, x: number, y: number): Resolved
  */
 export function describePositionStrategies(editor: Editor): string {
     const wrapperPos = readFunction(editor, "posAtCoords") !== null;
-    const cm = readProperty(editor, "cm");
-    const cmPresent = typeof cm === "object" && cm !== null;
-    const cmPos = cmPresent ? readFunction(cm, "posAtCoords") !== null : false;
+    const cm = readObject(editor, "cm");
+    const cmPos = cm === null ? null : readFunction(cm, "posAtCoords");
     const coordsAtPos = readFunction(editor, "coordsAtPos") !== null;
     const firstVisible = readNumber(editor, "getFirstVisibleLine");
     const lastVisible = readNumber(editor, "getLastVisibleLine");
     return [
         `editor.posAtCoords: ${wrapperPos ? "yes" : "no"}`,
-        `editor.cm: ${cmPresent ? "yes" : "no"}`,
-        `cm.posAtCoords: ${cmPos ? "yes" : "no"}`,
+        `editor.cm: ${cm === null ? "no" : "yes"}`,
+        `cm.posAtCoords: ${cmPos !== null ? "yes" : "no"}`,
         `editor.coordsAtPos: ${coordsAtPos ? "yes" : "no"}`,
         `visible lines: ${firstVisible}/${lastVisible}`,
     ].join(", ");

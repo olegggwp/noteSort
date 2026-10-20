@@ -1,7 +1,7 @@
 import { MarkdownView } from "obsidian";
 
 import type { ParagraphRange } from "./lib/paragraph";
-import { readElement, readProperty, safely } from "./lib/runtime-probe";
+import { readElement, readObject, safely } from "./lib/runtime-probe";
 
 /**
  * Swipe feedback: the paragraph under the finger looks cut out of the note
@@ -86,14 +86,9 @@ function contentElement(view: MarkdownView): HTMLElement | null {
 
 /** The editor's own root element; carries the state of the running cut. */
 function editorRoot(view: MarkdownView): HTMLElement {
-    const cm = readProperty(view.editor, "cm");
-    if (typeof cm === "object" && cm !== null) {
-        const dom = readElement(cm, "dom");
-        if (dom !== null) {
-            return dom;
-        }
-    }
-    return contentElement(view) ?? view.contentEl;
+    const cm = readObject(view.editor, "cm");
+    const dom = cm === null ? null : readElement(cm, "dom");
+    return dom ?? contentElement(view) ?? view.contentEl;
 }
 
 /**

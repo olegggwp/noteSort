@@ -38,7 +38,7 @@ export function joinLines(lines: readonly string[]): string {
 
 /** Normalizes CRLF and lone CR line endings to LF. */
 export function normalizeLineEndings(text: string): string {
-    return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    return text.replace(/\r\n?/g, "\n");
 }
 
 /**
@@ -128,7 +128,7 @@ export function appendParagraphToText(target: string, paragraph: string): string
     while (base.length > 0 && isBlankLine(base[base.length - 1])) {
         base.pop();
     }
-    if (paragraph.trim().length === 0) {
+    if (isBlankLine(paragraph)) {
         return joinLines(base);
     }
     if (base.length === 0) {

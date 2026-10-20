@@ -60,7 +60,6 @@
     z-index: var(--layer-popover, 30);
     box-sizing: border-box;
     pointer-events: none;
-    border-radius: var(--radius-m, 8px);
     background: rgba(94, 160, 255, 0.08);
 }
 
@@ -100,7 +99,6 @@
     z-index: var(--layer-popover, 30);
     box-sizing: border-box;
     pointer-events: none;
-    border-radius: var(--radius-m, 8px);
     opacity: calc(0.38 + 0.62 * var(--paragraph-swipe-progress));
     transform: translateX(var(--paragraph-swipe-shift, 0px));
     will-change: transform, opacity;

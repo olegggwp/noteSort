@@ -80,28 +80,28 @@ function safely(probe) {
     return null;
   }
 }
+function isObject(value) {
+  return typeof value === "object" && value !== null;
+}
 function readProperty(host, key) {
   return host[key];
 }
+function readObject(host, key) {
+  const value = readProperty(host, key);
+  return isObject(value) ? value : null;
+}
 function readFunction(host, key) {
   const value = readProperty(host, key);
-  if (typeof value !== "function") {
-    return null;
-  }
-  return value;
+  return typeof value === "function" ? value : null;
 }
 function readNumber(host, key) {
-  const value = readProperty(host, key);
-  const raw = typeof value === "function" ? safely(() => value.call(host)) : value;
+  const callable = readFunction(host, key);
+  const raw = callable === null ? readProperty(host, key) : safely(() => callable.call(host));
   return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
 function readElement(host, key) {
-  const value = readProperty(host, key);
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const record = value;
-  if (typeof record["getBoundingClientRect"] !== "function") {
+  const value = readObject(host, key);
+  if (value === null || typeof value["getBoundingClientRect"] !== "function") {
     return null;
   }
   return value;
@@ -109,12 +109,11 @@ function readElement(host, key) {
 
 // src/editor-position.ts
 function asEditorPosition(value) {
-  if (typeof value !== "object" || value === null) {
+  if (!isObject(value)) {
     return null;
   }
-  const record = value;
-  const line = record["line"];
-  const ch = record["ch"];
+  const line = value["line"];
+  const ch = value["ch"];
   if (typeof line !== "number" || !Number.isInteger(line) || line < 0) {
     return null;
   }
@@ -124,12 +123,11 @@ function asEditorPosition(value) {
   return { line, ch: Math.floor(ch) };
 }
 function asVerticalBounds(value) {
-  if (typeof value !== "object" || value === null) {
+  if (!isObject(value)) {
     return null;
   }
-  const record = value;
-  const top = record["top"];
-  const bottom = record["bottom"];
+  const top = value["top"];
+  const bottom = value["bottom"];
   if (typeof top !== "number" || typeof bottom !== "number" || !Number.isFinite(top) || !Number.isFinite(bottom)) {
     return null;
   }
@@ -143,8 +141,8 @@ function posFromEditorWrapper(editor, point) {
   return safely(() => asEditorPosition(posAtCoords.call(editor, point)));
 }
 function posFromCodeMirrorView(editor, point) {
-  const cmView = readProperty(editor, "cm");
-  if (typeof cmView !== "object" || cmView === null) {
+  const cmView = readObject(editor, "cm");
+  if (cmView === null) {
     return null;
   }
   const posAtCoords = readFunction(cmView, "posAtCoords");
@@ -195,16 +193,15 @@ function posAtClientPoint(editor, x, y) {
 }
 function describePositionStrategies(editor) {
   const wrapperPos = readFunction(editor, "posAtCoords") !== null;
-  const cm = readProperty(editor, "cm");
-  const cmPresent = typeof cm === "object" && cm !== null;
-  const cmPos = cmPresent ? readFunction(cm, "posAtCoords") !== null : false;
+  const cm = readObject(editor, "cm");
+  const cmPos = cm === null ? null : readFunction(cm, "posAtCoords");
   const coordsAtPos = readFunction(editor, "coordsAtPos") !== null;
   const firstVisible = readNumber(editor, "getFirstVisibleLine");
   const lastVisible = readNumber(editor, "getLastVisibleLine");
   return [
     `editor.posAtCoords: ${wrapperPos ? "yes" : "no"}`,
-    `editor.cm: ${cmPresent ? "yes" : "no"}`,
-    `cm.posAtCoords: ${cmPos ? "yes" : "no"}`,
+    `editor.cm: ${cm === null ? "no" : "yes"}`,
+    `cm.posAtCoords: ${cmPos !== null ? "yes" : "no"}`,
     `editor.coordsAtPos: ${coordsAtPos ? "yes" : "no"}`,
     `visible lines: ${firstVisible}/${lastVisible}`
   ].join(", ");
@@ -275,7 +272,7 @@ function joinLines(lines) {
   return lines.join("\n");
 }
 function normalizeLineEndings(text) {
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return text.replace(/\r\n?/g, "\n");
 }
 function getParagraphRange(lines, lineIndex) {
   if (!Number.isInteger(lineIndex) || lineIndex < 0 || lineIndex >= lines.length) {
@@ -337,7 +334,7 @@ function appendParagraphToText(target, paragraph) {
   while (base.length > 0 && isBlankLine(base[base.length - 1])) {
     base.pop();
   }
-  if (paragraph.trim().length === 0) {
+  if (isBlankLine(paragraph)) {
     return joinLines(base);
   }
   if (base.length === 0) {
@@ -527,14 +524,9 @@ function contentElement(view) {
 }
 function editorRoot(view) {
   var _a;
-  const cm = readProperty(view.editor, "cm");
-  if (typeof cm === "object" && cm !== null) {
-    const dom = readElement(cm, "dom");
-    if (dom !== null) {
-      return dom;
-    }
-  }
-  return (_a = contentElement(view)) != null ? _a : view.contentEl;
+  const cm = readObject(view.editor, "cm");
+  const dom = cm === null ? null : readElement(cm, "dom");
+  return (_a = dom != null ? dom : contentElement(view)) != null ? _a : view.contentEl;
 }
 function lineIndexAtPoint(lines, x, y) {
   const element = safely(() => document.elementFromPoint(x, y));
@@ -773,16 +765,15 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   async loadSettings() {
     const stored = await this.loadData();
     this.settings = { ...DEFAULT_SETTINGS };
-    if (typeof stored !== "object" || stored === null) {
+    if (!isObject(stored)) {
       return;
     }
-    const record = stored;
-    const threshold = record["swipeThresholdPx"];
+    const threshold = stored["swipeThresholdPx"];
     if (typeof threshold === "number" && Number.isFinite(threshold)) {
       this.settings.swipeThresholdPx = clampSwipeThreshold(threshold);
     }
-    if (typeof record["debugMode"] === "boolean") {
-      this.settings.debugMode = record["debugMode"];
+    if (typeof stored["debugMode"] === "boolean") {
+      this.settings.debugMode = stored["debugMode"];
     }
   }
   /** Logs to the console and toasts, both only while debug mode is on. */
@@ -1084,14 +1075,10 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     this.cut = null;
     cut == null ? void 0 : cut.drop();
   }
-  /** Runtime probe: `leftSplit` differs between typings releases. */
-  leftSplit() {
-    const leftSplit = readProperty(this.app.workspace, "leftSplit");
-    return typeof leftSplit === "object" && leftSplit !== null ? leftSplit : null;
-  }
+  /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
   isLeftDrawerOpen() {
-    const leftSplit = this.leftSplit();
-    return leftSplit !== null && readProperty(leftSplit, "collapsed") === false;
+    var _a;
+    return ((_a = readObject(this.app.workspace, "leftSplit")) == null ? void 0 : _a.collapsed) === false;
   }
   /**
    * Safety net: if the drawer gesture still managed to open the left sidebar
@@ -1103,7 +1090,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     if (gesture.leftDrawerOpenAtStart || !this.isLeftDrawerOpen()) {
       return;
     }
-    const leftSplit = this.leftSplit();
+    const leftSplit = readObject(this.app.workspace, "leftSplit");
     if (leftSplit === null) {
       return;
     }
