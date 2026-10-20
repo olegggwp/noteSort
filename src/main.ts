@@ -1,6 +1,11 @@
 import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
 
-import { describePositionStrategies, isEditorEditable, posAtClientPoint } from "./editor-position";
+import {
+    describePositionAttempt,
+    describePositionStrategies,
+    isEditorEditable,
+    posAtClientPoint,
+} from "./editor-position";
 import { decideGesture, isCRAZYIntent, isRightwardSwipe, swipeProgress, touchById } from "./lib/gesture";
 import {
     appendParagraphToText,
@@ -22,7 +27,7 @@ import { SwipeGlow } from "./swipe-glow";
 type ParagraphLookup =
     | { readonly kind: "paragraph"; readonly range: ParagraphRange; readonly strategy: string }
     | { readonly kind: "unresolved"; readonly detail: string }
-    | { readonly kind: "blank"; readonly line: number; readonly strategy: string };
+    | { readonly kind: "blank"; readonly line: number; readonly strategy: string; readonly detail: string };
 
 interface TouchGesture {
     readonly touchId: number;
@@ -73,6 +78,14 @@ export default class ParagraphSwipePlugin extends Plugin {
     public async onload(): Promise<void> {
         await this.loadSettings();
         this.addSettingTab(new ParagraphSwipeSettingTab(this.app, this));
+        // One notice per plugin load when debug is on: if nothing shows up at
+        // all, the plugin is not running rather than the gesture being lost,
+        // and the dir tells which of the on-disk copies is actually live —
+        // a duplicated plugin id can otherwise keep running from the folder
+        // the shop did not update.
+        this.debugLog(
+            `loaded from ${this.readPluginDir()}, threshold ${this.settings.swipeThresholdPx} px, debug ${this.settings.debugMode}`,
+        );
 
         this.registerDomEvent(
             window,
@@ -161,6 +174,12 @@ export default class ParagraphSwipePlugin extends Plugin {
         }
     }
 
+    /** Obsidian reads plugin files from the folder in `manifest.dir`. */
+    private readPluginDir(): string {
+        const dir = (this.manifest as unknown as Record<string, unknown>)["dir"];
+        return typeof dir === "string" && dir.length > 0 ? dir.slice(0, 8) + "…/" : "(unknown folder)";
+    }
+
     /** Logs to the console always; additionally toasts when debug mode is on. */
     private debugLog(message: string): void {
         console.log(`Paragraph Swipe: ${message}`);
@@ -192,6 +211,9 @@ export default class ParagraphSwipePlugin extends Plugin {
         return null;
     }
 
+    // These ignores below are where 2.1.0 lost gestures silently: every one of
+    // them now reports itself, so the release build finally explains touches
+    // that do nothing on the phone.
     private onTouchStart(event: TouchEvent): void {
         const activeGesture = this.gesture;
         if (activeGesture !== null && activeGesture.claimed && event.touches.length > 1) {
@@ -483,12 +505,13 @@ export default class ParagraphSwipePlugin extends Plugin {
     private lookupParagraph(view: MarkdownView, x: number, y: number): ParagraphLookup {
         const editor = view.editor;
         const resolved = posAtClientPoint(editor, x, y);
+        const attempt = describePositionAttempt(editor, x, y);
         if (resolved === null) {
-            return { kind: "unresolved", detail: describePositionStrategies(editor) };
+            return { kind: "unresolved", detail: `${describePositionStrategies(editor)}; ${attempt}` };
         }
         const range = getParagraphRange(splitLines(editor.getValue()), resolved.position.line);
         if (range === null) {
-            return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
+            return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy, detail: attempt };
         }
         return { kind: "paragraph", range, strategy: resolved.strategy };
     }
@@ -504,7 +527,7 @@ export default class ParagraphSwipePlugin extends Plugin {
         }
         if (lookup.kind === "blank") {
             this.debugLog(
-                `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) — nothing to move`,
+                `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) — ${lookup.detail}`,
             );
             return;
         }

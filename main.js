@@ -179,19 +179,29 @@ function posAtClientPoint(editor, x, y) {
     return null;
   }
   const point = { x, y };
-  const fromWrapper = posFromEditorWrapper(editor, point);
-  if (fromWrapper !== null) {
-    return { position: fromWrapper, strategy: "editor.posAtCoords" };
-  }
   const fromCodeMirror = posFromCodeMirrorView(editor, point);
   if (fromCodeMirror !== null) {
     return { position: fromCodeMirror, strategy: "editor.cm.posAtCoords" };
+  }
+  const fromWrapper = posFromEditorWrapper(editor, point);
+  if (fromWrapper !== null) {
+    return { position: fromWrapper, strategy: "editor.posAtCoords" };
   }
   const fromScan = posFromLineScan(editor, y);
   if (fromScan !== null) {
     return { position: fromScan, strategy: "coordsAtPos line scan" };
   }
   return null;
+}
+function describePositionAttempt(editor, x, y) {
+  const asLine = (pos) => pos === null ? "none" : `line ${pos.line + 1} ch ${pos.ch}`;
+  const point = { x, y };
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return "invalid point";
+  }
+  return `wrapper=${asLine(posFromEditorWrapper(editor, point))}, cm=${asLine(posFromCodeMirrorView(editor, point))}, scan=${asLine(
+    posFromLineScan(editor, y)
+  )}, doc=${editor.lineCount()} lines`;
 }
 function describePositionStrategies(editor) {
   const wrapperPos = readFunction(editor, "posAtCoords") !== null;
@@ -216,7 +226,7 @@ function isEditorEditable(editor) {
 
 // src/lib/gesture.ts
 var MIN_VERTICAL_TOLERANCE_PX = 24;
-var DECISION_DISTANCE_PX = 12;
+var DECISION_DISTANCE_PX = 10;
 function verticalTolerancePx(swipeThresholdPx) {
   return Math.max(MIN_VERTICAL_TOLERANCE_PX, Math.round(swipeThresholdPx / 2));
 }
@@ -649,6 +659,9 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new ParagraphSwipeSettingTab(this.app, this));
+    this.debugLog(
+      `loaded from ${this.readPluginDir()}, threshold ${this.settings.swipeThresholdPx} px, debug ${this.settings.debugMode}`
+    );
     this.registerDomEvent(
       window,
       "touchstart",
@@ -720,6 +733,11 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       this.settings.debugMode = record["debugMode"];
     }
   }
+  /** Obsidian reads plugin files from the folder in `manifest.dir`. */
+  readPluginDir() {
+    const dir = this.manifest["dir"];
+    return typeof dir === "string" && dir.length > 0 ? dir.slice(0, 8) + "\u2026/" : "(unknown folder)";
+  }
   /** Logs to the console always; additionally toasts when debug mode is on. */
   debugLog(message) {
     console.log(`Paragraph Swipe: ${message}`);
@@ -748,6 +766,9 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     return null;
   }
+  // These ignores below are where 2.1.0 lost gestures silently: every one of
+  // them now reports itself, so the release build finally explains touches
+  // that do nothing on the phone.
   onTouchStart(event) {
     const activeGesture = this.gesture;
     if (activeGesture !== null && activeGesture.claimed && event.touches.length > 1) {
@@ -1001,12 +1022,13 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
   lookupParagraph(view, x, y) {
     const editor = view.editor;
     const resolved = posAtClientPoint(editor, x, y);
+    const attempt = describePositionAttempt(editor, x, y);
     if (resolved === null) {
-      return { kind: "unresolved", detail: describePositionStrategies(editor) };
+      return { kind: "unresolved", detail: `${describePositionStrategies(editor)}; ${attempt}` };
     }
     const range = getParagraphRange(splitLines(editor.getValue()), resolved.position.line);
     if (range === null) {
-      return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
+      return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy, detail: attempt };
     }
     return { kind: "paragraph", range, strategy: resolved.strategy };
   }
@@ -1021,7 +1043,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     if (lookup.kind === "blank") {
       this.debugLog(
-        `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) \u2014 nothing to move`
+        `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) \u2014 ${lookup.detail}`
       );
       return;
     }

@@ -9,8 +9,13 @@ export const MIN_VERTICAL_TOLERANCE_PX = 24;
  * Total travel (in px) after which the gesture direction is decided:
  * horizontal-dominant movement is claimed by the plugin, vertical-dominant
  * movement is released back to the app for scrolling.
+ *
+ * 200 px was the released value and it made the plugin dead on phones: a
+ * typical rightward swipe of 80–150 px stayed "undecided" until the finger
+ * left the screen, so nothing was ever claimed and nothing was ever logged.
+ * 10 px matches what the unreleased cut-rework validated in practice.
  */
-export const DECISION_DISTANCE_PX = 200;
+export const DECISION_DISTANCE_PX = 10;
 
 /**
  * Horizontal travel (in px) at which the swipe feedback lights up. Well below
