@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, SettingDefinitionItem } from "obsidian";
 
 import type ParagraphSwipePlugin from "./main";
 
@@ -30,6 +30,54 @@ export class ParagraphSwipeSettingTab extends PluginSettingTab {
     constructor(app: App, plugin: ParagraphSwipePlugin) {
         super(app, plugin);
         this.plugin = plugin;
+    }
+
+    /**
+     * Declarative definitions for Obsidian 1.13+ — the same controls that
+     * display() renders below. The framework then renders them itself and
+     * feeds the settings search; older app versions keep using display().
+     */
+    public getSettingDefinitions(): SettingDefinitionItem[] {
+        return [
+            {
+                name: "Swipe threshold",
+                desc: "Minimum horizontal finger travel in pixels that opens the note picker when swiping right over a paragraph.",
+                control: {
+                    key: "swipeThresholdPx",
+                    type: "number",
+                    defaultValue: DEFAULT_SETTINGS.swipeThresholdPx,
+                    placeholder: String(DEFAULT_SETTINGS.swipeThresholdPx),
+                    min: MIN_SWIPE_THRESHOLD_PX,
+                    max: MAX_SWIPE_THRESHOLD_PX,
+                    step: 10,
+                },
+            },
+            {
+                name: "Debug notices",
+                desc: "Show a toast at every step of the swipe pipeline to diagnose gesture problems.",
+                control: {
+                    key: "debugMode",
+                    type: "toggle",
+                    defaultValue: DEFAULT_SETTINGS.debugMode,
+                },
+            },
+        ];
+    }
+
+    /** Keeps the clamping semantics on the declarative path too. */
+    public async setControlValue(key: string, value: unknown): Promise<void> {
+        if (key === "swipeThresholdPx") {
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed)) {
+                return;
+            }
+            this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
+        } else if (key === "debugMode") {
+            this.plugin.settings.debugMode = value === true;
+        } else {
+            return;
+        }
+        await this.plugin.saveSettings();
     }
 
     public display(): void {

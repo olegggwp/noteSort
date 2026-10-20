@@ -439,6 +439,52 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  /**
+   * Declarative definitions for Obsidian 1.13+ — the same controls that
+   * display() renders below. The framework then renders them itself and
+   * feeds the settings search; older app versions keep using display().
+   */
+  getSettingDefinitions() {
+    return [
+      {
+        name: "Swipe threshold",
+        desc: "Minimum horizontal finger travel in pixels that opens the note picker when swiping right over a paragraph.",
+        control: {
+          key: "swipeThresholdPx",
+          type: "number",
+          defaultValue: DEFAULT_SETTINGS.swipeThresholdPx,
+          placeholder: String(DEFAULT_SETTINGS.swipeThresholdPx),
+          min: MIN_SWIPE_THRESHOLD_PX,
+          max: MAX_SWIPE_THRESHOLD_PX,
+          step: 10
+        }
+      },
+      {
+        name: "Debug notices",
+        desc: "Show a toast at every step of the swipe pipeline to diagnose gesture problems.",
+        control: {
+          key: "debugMode",
+          type: "toggle",
+          defaultValue: DEFAULT_SETTINGS.debugMode
+        }
+      }
+    ];
+  }
+  /** Keeps the clamping semantics on the declarative path too. */
+  async setControlValue(key, value) {
+    if (key === "swipeThresholdPx") {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) {
+        return;
+      }
+      this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
+    } else if (key === "debugMode") {
+      this.plugin.settings.debugMode = value === true;
+    } else {
+      return;
+    }
+    await this.plugin.saveSettings();
+  }
   display() {
     const { containerEl } = this;
     containerEl.empty();
@@ -553,8 +599,7 @@ function unionRect(elements) {
   return { top: visibleTop, bottom: visibleBottom, left, right };
 }
 function appendOverlay(cls, rect) {
-  const element = document.createElement("div");
-  element.className = cls;
+  const element = createEl("div", { cls });
   element.style.top = `${Math.round(rect.top)}px`;
   element.style.left = `${Math.round(rect.left)}px`;
   element.style.width = `${Math.round(rect.right - rect.left)}px`;
@@ -756,12 +801,13 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       this.settings.debugMode = record["debugMode"];
     }
   }
-  /** Logs to the console always; additionally toasts when debug mode is on. */
+  /** Logs to the console and toasts, both only while debug mode is on. */
   debugLog(message) {
-    console.log(`Paragraph Swipe: ${message}`);
-    if (this.settings.debugMode) {
-      new import_obsidian3.Notice(`Paragraph Swipe: ${message}`, 8e3);
+    if (!this.settings.debugMode) {
+      return;
     }
+    console.log(`Paragraph Swipe: ${message}`);
+    new import_obsidian3.Notice(`Paragraph Swipe: ${message}`, 8e3);
   }
   isEditableSourceView(view) {
     return view.getMode() === "source" && isEditorEditable(view.editor);

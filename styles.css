@@ -56,14 +56,21 @@
    dashed: the vertical ones would read as the sides of a card, not as a gap. */
 .paragraph-swipe-slot {
     --paragraph-swipe-dash: rgba(94, 160, 255, 0.6);
-    --paragraph-swipe-dash: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 60%, transparent);
     position: fixed;
     z-index: var(--layer-popover, 30);
     box-sizing: border-box;
     pointer-events: none;
     border-radius: var(--radius-m, 8px);
     background: rgba(94, 160, 255, 0.08);
-    background: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 10%, transparent);
+}
+
+/* color-mix ties the dashes and the wash to the theme accent; the rgba values
+   above remain the fallback for viewports that predate color-mix. */
+@supports (background: color-mix(in srgb, red 10%, transparent)) {
+    .paragraph-swipe-slot {
+        --paragraph-swipe-dash: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 60%, transparent);
+        background: color-mix(in srgb, var(--interactive-accent, #5ea0ff) 10%, transparent);
+    }
 }
 
 .paragraph-swipe-slot::before,
@@ -98,30 +105,35 @@
     transform: translateX(var(--paragraph-swipe-shift, 0px));
     will-change: transform, opacity;
     background: linear-gradient(90deg, rgba(94, 160, 255, 0.38), rgba(94, 160, 255, 0.1) 62%, rgba(94, 160, 255, 0));
-    background: linear-gradient(
-        90deg,
-        color-mix(in srgb, var(--interactive-accent, #5ea0ff) 40%, transparent),
-        color-mix(in srgb, var(--interactive-accent, #5ea0ff) 12%, transparent) 62%,
-        transparent
-    );
     /* The two offset shadows bleed out of the top and bottom edges; the spread
        cancels the offset, so the glow is cut cleanly at the edge itself. */
-    box-shadow: 0 0 12px rgba(94, 160, 255, 0.45);
     box-shadow:
         0 calc(-1 * var(--paragraph-swipe-edge)) var(--paragraph-swipe-blur)
             calc(-1 * var(--paragraph-swipe-edge)) rgba(94, 160, 255, 0.55),
         0 var(--paragraph-swipe-edge) var(--paragraph-swipe-blur)
             calc(-1 * var(--paragraph-swipe-edge)) rgba(94, 160, 255, 0.55),
         0 0 calc(6px + 10px * var(--paragraph-swipe-progress)) rgba(94, 160, 255, 0.4);
-    box-shadow:
-        0 calc(-1 * var(--paragraph-swipe-edge)) var(--paragraph-swipe-blur)
-            calc(-1 * var(--paragraph-swipe-edge))
-            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
-        0 var(--paragraph-swipe-edge) var(--paragraph-swipe-blur)
-            calc(-1 * var(--paragraph-swipe-edge))
-            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
-        0 0 calc(6px + 10px * var(--paragraph-swipe-progress))
-            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 50%, transparent);
+}
+
+/* color-mix ties the plate to the theme accent instead of the default blue. */
+@supports (background: color-mix(in srgb, red 40%, transparent)) {
+    .paragraph-swipe-plate {
+        background: linear-gradient(
+            90deg,
+            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 40%, transparent),
+            color-mix(in srgb, var(--interactive-accent, #5ea0ff) 12%, transparent) 62%,
+            transparent
+        );
+        box-shadow:
+            0 calc(-1 * var(--paragraph-swipe-edge)) var(--paragraph-swipe-blur)
+                calc(-1 * var(--paragraph-swipe-edge))
+                color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
+            0 var(--paragraph-swipe-edge) var(--paragraph-swipe-blur)
+                calc(-1 * var(--paragraph-swipe-edge))
+                color-mix(in srgb, var(--interactive-accent, #5ea0ff) 65%, transparent),
+            0 0 calc(6px + 10px * var(--paragraph-swipe-progress))
+                color-mix(in srgb, var(--interactive-accent, #5ea0ff) 50%, transparent);
+    }
 }
 
 /* The swipe was abandoned: the block slides back into the slot it came from. */

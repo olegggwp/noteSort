@@ -188,12 +188,13 @@ export default class ParagraphSwipePlugin extends Plugin {
         }
     }
 
-    /** Logs to the console always; additionally toasts when debug mode is on. */
+    /** Logs to the console and toasts, both only while debug mode is on. */
     private debugLog(message: string): void {
-        console.log(`Paragraph Swipe: ${message}`);
-        if (this.settings.debugMode) {
-            new Notice(`Paragraph Swipe: ${message}`, 8000);
+        if (!this.settings.debugMode) {
+            return;
         }
+        console.log(`Paragraph Swipe: ${message}`);
+        new Notice(`Paragraph Swipe: ${message}`, 8000);
     }
 
     private isEditableSourceView(view: MarkdownView): boolean {

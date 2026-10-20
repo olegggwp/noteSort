@@ -175,8 +175,7 @@ function unionRect(elements: readonly HTMLElement[]): SwipeRect | null {
 
 /** Appends a fixed-position box to the document body. */
 function appendOverlay(cls: string, rect: SwipeRect): HTMLElement {
-    const element = document.createElement("div");
-    element.className = cls;
+    const element = createEl("div", { cls });
     element.style.top = `${Math.round(rect.top)}px`;
     element.style.left = `${Math.round(rect.left)}px`;
     element.style.width = `${Math.round(rect.right - rect.left)}px`;
