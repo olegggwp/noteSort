@@ -1,68 +1,30 @@
-import { MarkdownView, Notice, Plugin, TFile } from "obsidian";
+import { MarkdownView, Plugin, TFile } from "obsidian";
 
-import { describePositionStrategies, isEditorEditable, posAtClientPoint } from "./editor-position";
-import { decideGesture, decisionDistancePx, isCRAZYIntent, isRightwardSwipe, swipeProgress, touchById } from "./lib/gesture";
-import {
-    appendParagraphToText,
-    extractParagraphLines,
-    getDeletionRange,
-    getParagraphRange,
-    joinLines,
-    normalizeLineEndings,
-    splitLines,
-    toCharRange,
-} from "./lib/paragraph";
-import type { ParagraphRange } from "./lib/paragraph";
-import { isObject, readFunction, readObject } from "./lib/runtime-probe";
+import { isEditorEditable } from "./editor-position";
+import { showError } from "./lib/notify";
 import { NotePickerModal } from "./note-picker-modal";
+import { ParagraphTransport } from "./paragraph-transport";
+import type { ParagraphLookup, ResolvedParagraph } from "./paragraph-transport";
 import { clampSwipeThreshold, DEFAULT_SETTINGS, ParagraphSwipeSettingTab } from "./settings";
 import type { ParagraphSwipeSettings } from "./settings";
 import { SwipeCut } from "./swipe-cut";
+import { TouchClaimTracker } from "./touch-claim";
+import type { SwipeGesture } from "./touch-claim";
 
-/** Human-readable message of an unknown thrown value. */
-function describeError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+/** Finds the editable source-mode MarkdownView behind a check. */
+function isEditableSourceView(view: MarkdownView): boolean {
+    return view.getMode() === "source" && isEditorEditable(view.editor);
 }
 
-/** A paragraph found under a viewport point, and how it was found. */
-interface ResolvedParagraph {
-    readonly range: ParagraphRange;
-    /** The document line under the finger, i.e. where inside the paragraph it is. */
-    readonly line: number;
-    readonly strategy: string;
-}
-
-/** Outcome of resolving the paragraph under a viewport point. */
-type ParagraphLookup =
-    | ({ readonly kind: "paragraph" } & ResolvedParagraph)
-    | { readonly kind: "unresolved"; readonly detail: string }
-    | { readonly kind: "blank"; readonly line: number; readonly strategy: string };
-
-interface TouchGesture {
-    readonly touchId: number;
-    readonly startX: number;
-    readonly startY: number;
-    readonly view: MarkdownView;
-    /** State of the left sidebar when the touch started. */
-    readonly leftDrawerOpenAtStart: boolean;
-    /** The gesture was claimed: all further events are hidden from the app. */
-    claimed: boolean;
-    /** The gesture was released back to the app (a scroll, a leftward drag). */
-    released: boolean;
-    /** The picker has been opened for this gesture. */
-    consumed: boolean;
-    /** Touchmove events received after the claim (diagnostics). */
-    claimedMoves: number;
-    /** Horizontal delta at the last received touchmove (diagnostics). */
-    lastDeltaX: number;
-    /**
-     * The paragraph resolved when the cut effect started. Mandatory once the
-     * effect runs: the lines are physically displaced by then, so asking the
-     * editor what sits under the start coordinates would hit a different line.
-     */
-    paragraph: ResolvedParagraph | null;
-    /** Set when the feedback failed: it must never hold the gesture up again. */
-    effectBroken: boolean;
+/** The conductor state of the swipe the tracker is currently reporting. */
+interface SwipeSession {
+    /** The paragraph resolved when the effect started, or a fresh one at the pick. */
+    resolved: ResolvedParagraph | null;
+    cut: SwipeCut | null;
+    /** One failed effect disables it for the rest of the gesture. */
+    broken: boolean;
+    /** The picker has taken the paragraph over. */
+    accepted: boolean;
 }
 
 /**
@@ -70,40 +32,42 @@ interface TouchGesture {
  * the picked note receives the paragraph at its end (separated by one blank
  * line) and the paragraph is removed from the source note.
  *
- * Touches are observed on `window` in the capture phase — the earliest point
- * in the DOM. Any gesture that starts over an editable source-mode editor and
- * becomes horizontal-dominant is claimed: its remaining events are swallowed
- * (preventDefault + stopImmediatePropagation), which keeps Obsidian mobile's
- * built-in swipe-to-open-left-sidebar gesture from ever firing, wherever the
- * swipe started. Because some WebView builds stop delivering touchmove events
- * after a claimed gesture, the threshold is re-checked on touchend. Vertical
- * scrolls, leftward drags, and gestures with a second finger before the claim
- * are never blocked; an already claimed gesture survives stray extra touches.
- *
- * While the finger travels right, the paragraph it started on is cut out of
- * the note and carried along with the finger (see `SwipeCut`): its real lines
- * move, a dashed slot is left behind, and a glowing plate whose brightness
- * grows with the travelled distance rides along, so the threshold is visible
- * before the picker takes over.
+ * This module is only the conductor: it wires the touch pipeline, the
+ * paragraph transport, the picker and the cut effect together and holds the
+ * state that connects them — which paragraph a swipe resolved and whether its
+ * effect is alive. The claim mechanics live in `TouchClaimTracker`, the
+ * content work in `ParagraphTransport`, the visuals in `SwipeCut`, the
+ * window-event plumbing in `onload`.
  */
 export default class ParagraphSwipePlugin extends Plugin {
     public settings: ParagraphSwipeSettings = { ...DEFAULT_SETTINGS };
 
-    private gesture: TouchGesture | null = null;
+    private transport!: ParagraphTransport;
+    private tracker!: TouchClaimTracker;
 
-    /** The paragraph being carried away by the swipe in progress, if any. */
-    private cut: SwipeCut | null = null;
+    /** Effect state of each gesture, dying with the gesture object itself. */
+    private readonly sessions = new WeakMap<SwipeGesture, SwipeSession>();
+    /** The session of the gesture seen last: the scroll safety net uses it. */
+    private currentSession: SwipeSession | null = null;
 
     public async onload(): Promise<void> {
         await this.loadSettings();
-        this.debugLog(`loaded (threshold ${this.settings.swipeThresholdPx} px)`);
         this.addSettingTab(new ParagraphSwipeSettingTab(this.app, this));
+        this.transport = new ParagraphTransport(this.app);
+        this.tracker = new TouchClaimTracker(this.app, () => this.settings.swipeThresholdPx, {
+            findEditableView: (target) => this.findEditableView(target),
+            onTravel: (gesture, deltaX) => this.travel(gesture, deltaX, false),
+            onCarry: (gesture, deltaX) => this.travel(gesture, deltaX, true),
+            onAccepted: (gesture) => this.accept(gesture),
+            onAbandoned: (gesture) => this.abandon(gesture),
+            onReset: (gesture) => this.reset(gesture),
+        });
 
         this.registerDomEvent(
             window,
             "touchstart",
             (event: TouchEvent) => {
-                this.onTouchStart(event);
+                this.tracker.onTouchStart(event);
             },
             { capture: true, passive: true },
         );
@@ -113,7 +77,7 @@ export default class ParagraphSwipePlugin extends Plugin {
             window,
             "touchmove",
             (event: TouchEvent) => {
-                this.onTouchMove(event);
+                this.tracker.onTouchMove(event);
             },
             { capture: true, passive: false },
         );
@@ -121,7 +85,7 @@ export default class ParagraphSwipePlugin extends Plugin {
             window,
             "touchend",
             (event: TouchEvent) => {
-                this.onTouchEnd(event);
+                this.tracker.onTouchEnd(event);
             },
             { capture: true, passive: true },
         );
@@ -129,42 +93,42 @@ export default class ParagraphSwipePlugin extends Plugin {
             window,
             "touchcancel",
             (event: TouchEvent) => {
-                this.onTouchCancel(event);
+                this.tracker.onTouchCancel(event);
+            },
+            { capture: true, passive: true },
+        );
+        // Second channel for the effect: some WebView builds stop delivering
+        // touchmove once the gesture is claimed (which is why the threshold is
+        // re-checked on touchend); pointer events are generated from the same
+        // input pipeline independently, so the block keeps travelling with the
+        // finger there. Passive: we only read coordinates.
+        this.registerDomEvent(
+            window,
+            "pointermove",
+            (event: PointerEvent) => {
+                this.tracker.onPointerMove(event);
             },
             { capture: true, passive: true },
         );
         // Safety net for the cut effect: a claimed swipe blocks scrolling, so
         // any scroll seen while a block is travelling means the viewport moved
         // underneath it (the picker opening, the layout resizing) and the
-        // displaced lines have to snap back at once.
-        // Capture is what makes the non-bubbling scroll of any element in the
-        // document reach the window listener.
+        // displaced lines have to snap back at once. Capture is what makes the
+        // non-bubbling scroll of any element in the document reach the window
+        // listener.
         this.registerDomEvent(
             window,
             "scroll",
             () => {
-                this.dropCut();
-            },
-            { capture: true, passive: true },
-        );
-        // Second channel for the effect's progress. Some WebView builds stop
-        // delivering touchmove once the gesture is claimed (which is why the
-        // threshold is re-checked on touchend); pointer events are generated
-        // from the same input pipeline independently, so the block keeps
-        // travelling with the finger there. Passive: we only read coordinates.
-        this.registerDomEvent(
-            window,
-            "pointermove",
-            (event: PointerEvent) => {
-                this.onPointerMove(event);
+                this.currentSession?.cut?.drop();
             },
             { capture: true, passive: true },
         );
     }
 
     public onunload(): void {
-        this.gesture = null;
-        this.dropCut();
+        this.currentSession?.cut?.drop();
+        this.currentSession = null;
     }
 
     public async saveSettings(): Promise<void> {
@@ -174,29 +138,13 @@ export default class ParagraphSwipePlugin extends Plugin {
     private async loadSettings(): Promise<void> {
         const stored: unknown = await this.loadData();
         this.settings = { ...DEFAULT_SETTINGS };
-        if (!isObject(stored)) {
+        if (typeof stored !== "object" || stored === null) {
             return;
         }
-        const threshold = stored["swipeThresholdPx"];
+        const threshold = (stored as Record<string, unknown>)["swipeThresholdPx"];
         if (typeof threshold === "number" && Number.isFinite(threshold)) {
             this.settings.swipeThresholdPx = clampSwipeThreshold(threshold);
         }
-        if (typeof stored["debugMode"] === "boolean") {
-            this.settings.debugMode = stored["debugMode"];
-        }
-    }
-
-    /** Logs to the console and toasts, both only while debug mode is on. */
-    private debugLog(message: string): void {
-        if (!this.settings.debugMode) {
-            return;
-        }
-        console.log(`Paragraph Swipe: ${message}`);
-        new Notice(`Paragraph Swipe: ${message}`, 8000);
-    }
-
-    private isEditableSourceView(view: MarkdownView): boolean {
-        return view.getMode() === "source" && isEditorEditable(view.editor);
     }
 
     /**
@@ -204,261 +152,66 @@ export default class ParagraphSwipePlugin extends Plugin {
      * element. The active view is checked first; the loop over all markdown
      * leaves covers swipes in unfocused split panes.
      */
-    private findSourceMarkdownView(target: Element): MarkdownView | null {
+    private findEditableView(target: Element): MarkdownView | null {
         const active = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (active !== null && this.isEditableSourceView(active) && active.contentEl.contains(target)) {
+        if (active !== null && isEditableSourceView(active) && active.contentEl.contains(target)) {
             return active;
         }
         for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
             const view = leaf.view;
-            if (view instanceof MarkdownView && this.isEditableSourceView(view) && view.contentEl.contains(target)) {
+            if (view instanceof MarkdownView && isEditableSourceView(view) && view.contentEl.contains(target)) {
                 return view;
             }
         }
         return null;
     }
 
-    private onTouchStart(event: TouchEvent): void {
-        // A stray second finger must not kill an active claimed swipe.
-        if (this.gesture !== null && this.gesture.claimed && event.touches.length > 1) {
-            return;
+    /**
+     * Collects (or opens) the effect state of a gesture. The per-gesture map
+     * keeps the state from outliving its gesture: every terminal event of the
+     * tracker is handled through the same object until the gesture object
+     * itself dies.
+     */
+    private sessionFor(gesture: SwipeGesture): SwipeSession {
+        let session = this.sessions.get(gesture);
+        if (session === undefined) {
+            session = { resolved: null, cut: null, broken: false, accepted: false };
+            this.sessions.set(gesture, session);
+            this.currentSession = session;
         }
-        this.gesture = null;
-        this.dropCut();
-        const touch = event.touches[0];
-        if (event.touches.length !== 1 || touch === undefined) {
-            return;
-        }
-        const target = event.target;
-        if (!(target instanceof Element)) {
-            return;
-        }
-        const selection = window.getSelection();
-        if (selection !== null && !selection.isCollapsed) {
-            return; // an active text selection: leave handle dragging to the app
-        }
-        const view = this.findSourceMarkdownView(target);
-        if (view === null) {
-            return;
-        }
-        this.gesture = {
-            touchId: touch.identifier,
-            startX: touch.clientX,
-            startY: touch.clientY,
-            view,
-            leftDrawerOpenAtStart: this.isLeftDrawerOpen(),
-            claimed: false,
-            released: false,
-            consumed: false,
-            claimedMoves: 0,
-            lastDeltaX: 0,
-            paragraph: null,
-            effectBroken: false,
-        };
-        // touchstart is never swallowed: taps must keep placing the caret.
+        return session;
     }
 
-    private onTouchMove(event: TouchEvent): void {
-        const gesture = this.gesture;
-        if (gesture === null || gesture.released) {
-            return;
-        }
-        const touch = touchById(event.changedTouches, gesture.touchId);
-        if (touch === null) {
-            return;
-        }
-        if (gesture.claimed) {
-            // Keep swallowing regardless of the number of active touches: a
-            // claimed gesture must run to completion even if a palm touch lands.
-            this.swallowTouch(event);
-            gesture.claimedMoves += 1;
-            const deltaX = touch.clientX - gesture.startX;
-            gesture.lastDeltaX = deltaX;
-            this.feedCut(gesture, deltaX);
-            this.consumeAtThreshold(gesture, deltaX);
-            return;
-        }
-
-        if (event.touches.length !== 1) {
-            // A second finger landed before the claim (pinch, two-finger scroll):
-            // never block it.
-            gesture.released = true;
-            this.dropCut();
-            return;
-        }
-        const deltaX = touch.clientX - gesture.startX;
-        const deltaY = touch.clientY - gesture.startY;
-        // The direction is settled before the feedback runs: the claim is what
-        // stops Obsidian's own edge gestures, and it must not wait for the
-        // effect, which is only decoration and may fail.
-        const decision = decideGesture(deltaX, deltaY, decisionDistancePx(gesture.startX));
-        // The block leaves the note at the very first pixel of rightward
-        // travel, well before the gesture is claimed, so the paragraph is
-        // already moving while the finger is still going.
-        this.feedCut(gesture, deltaX);
-        if (decision === "undecided") {
-            return;
-        }
-        if (decision !== "rightward") {
-            // Scroll or leftward drag: none of our business, and the block has
-            // to go before the text slides out from under it.
-            gesture.released = true;
-            this.dropCut();
-            return;
-        }
-        // Horizontal-dominant rightward drag over the editor: claim it before
-        // the built-in drawer gesture reacts, wherever the touch started.
-        gesture.claimed = true;
-        this.swallowTouch(event);
-        this.debugLog(`swipe claimed (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px)`);
-        this.consumeAtThreshold(gesture, deltaX);
-    }
-
-    private onTouchEnd(event: TouchEvent): void {
-        const gesture = this.gesture;
-        if (gesture === null) {
-            return;
-        }
-        const touch = touchById(event.changedTouches, gesture.touchId);
-        if (touch === null) {
-            // An end event we cannot attribute: the finger is gone and the
-            // viewport is in an unknown state, so snap the block back at once.
-            this.dropCut();
-            return;
-        }
-        this.gesture = null;
-        const deltaX = touch.clientX - gesture.startX;
-        const deltaY = touch.clientY - gesture.startY;
-        if (gesture.claimed) {
-            this.swallowTouch(event);
-            if (gesture.consumed) {
-                // The picker is open: the paragraph is already gone from here.
-                this.dropCut();
-            } else if (this.consumeAtThreshold(gesture, deltaX)) {
-                this.debugLog(
-                    `the picker opened from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`,
-                );
-            } else {
-                this.debugLog(
-                    `swipe ended below the threshold (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px, threshold ${this.settings.swipeThresholdPx} px, ${gesture.claimedMoves} move event(s) received)`,
-                );
-                // A claimed swipe has blocked scrolling, so nothing moved:
-                // the block may glide back into its slot.
-                this.releaseCut();
-            }
-            this.collapseLeftDrawerIfOpenedByGesture(gesture);
-            return;
-        }
-        if (gesture.released || gesture.consumed) {
-            this.releaseCut();
-            return;
-        }
-        // Fast flick without intermediate moves (rare): decide on the end event.
-        if (
-            decideGesture(deltaX, deltaY) === "rightward" &&
-            isRightwardSwipe(deltaX, deltaY, this.settings.swipeThresholdPx)
-        ) {
-            this.openPickerSafely(gesture);
-        } else {
-            this.releaseCut();
-        }
-    }
-
-    private onTouchCancel(event: TouchEvent): void {
-        const gesture = this.gesture;
-        this.gesture = null;
-        // The system took the gesture away; the viewport may have moved with it.
-        this.dropCut();
-        if (gesture !== null && gesture.claimed) {
-            this.swallowTouch(event);
-            if (!gesture.consumed) {
-                this.debugLog(
-                    `the system cancelled the swipe after the claim (${gesture.claimedMoves} move event(s) received, last dx ${Math.round(gesture.lastDeltaX)} px)`,
-                );
-            }
-            this.collapseLeftDrawerIfOpenedByGesture(gesture);
-        }
+    private sessionOf(gesture: SwipeGesture): SwipeSession | null {
+        return this.sessions.get(gesture) ?? null;
     }
 
     /**
-     * Hides the remaining events of a claimed gesture from the app and from
-     * CodeMirror, so the built-in swipe-to-open-sidebar gesture is not
-     * triggered and no stray click is synthesized.
+     * Carries the effect along the swipe. Touch travel may start the effect
+     * (the block leaves the note at the very first pixel of rightward travel,
+     * well before the claim); pointer travel may only feed a started block,
+     * because the pointer channel runs independently of the touch pipeline
+     * and must never claim anything on its own. The whole feedback is
+     * optional: one exception disables it for the rest of the gesture.
      */
-    private swallowTouch(event: TouchEvent): void {
-        event.stopImmediatePropagation();
-        event.preventDefault();
-    }
-
-    /**
-     * The claim moment and every later touchmove re-check the threshold, and
-     * touchend checks it once more (some WebView builds stop delivering
-     * touchmove events once a gesture is claimed). Fires at most once.
-     */
-    private consumeAtThreshold(gesture: TouchGesture, deltaX: number): boolean {
-        if (gesture.consumed || deltaX < this.settings.swipeThresholdPx) {
-            return false;
-        }
-        gesture.consumed = true;
-        this.openPickerSafely(gesture);
-        return true;
-    }
-
-    /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
-    private openPickerSafely(gesture: TouchGesture): void {
-        this.detachCut(); // the block leaves the note for good
-        try {
-            this.triggerSwipe(gesture);
-        } catch (error) {
-            const message = describeError(error);
-            console.error("Paragraph Swipe: failed to open the picker", error);
-            new Notice(`Paragraph Swipe: internal error — ${message}`);
-        }
-    }
-
-    /**
-     * Progress channel for the effect: a pointermove only ever moves the block
-     * along, it never claims or swallows anything. Gestures only start from a
-     * touchstart, so there is nothing to do without one.
-     */
-    private onPointerMove(event: PointerEvent): void {
-        const gesture = this.gesture;
-        if (gesture === null || gesture.released || this.cut === null || !event.isPrimary) {
-            return; // a second finger must not drag the block away
-        }
-        const deltaX = event.clientX - gesture.startX;
-        gesture.lastDeltaX = deltaX;
-        this.feedCut(gesture, deltaX);
-    }
-
-    /**
-     * Starts the effect if it is not up yet and carries it to the finger. The
-     * whole feedback is optional: an exception in it must not abort the
-     * touchmove handler, or the gesture would never be claimed and the app's own
-     * edge gestures would take over. One failure disables it for the rest of
-     * the gesture instead of repeating it on every move.
-     */
-    private feedCut(gesture: TouchGesture, deltaX: number): void {
-        if (gesture.effectBroken || gesture.consumed) {
-            // Consumed means the picker has taken the paragraph over: the finger
-            // is still down, and starting a new block here would leave it behind
-            // on the document with nothing left to clean it up.
+    private travel(gesture: SwipeGesture, deltaX: number, fromPointer: boolean): void {
+        const session = this.sessionFor(gesture);
+        if (session.broken || session.accepted) {
             return;
         }
         try {
-            if (this.cut === null) {
-                if (!isCRAZYIntent(deltaX)) {
-                    return; // not a rightward swipe yet: nothing to carry away
+            if (session.cut === null) {
+                if (fromPointer || deltaX < 1) {
+                    return; // not a rightward touch travel: nothing to carry away
                 }
-                this.startCut(gesture, deltaX);
+                this.startEffect(session, gesture, deltaX);
             } else {
-                this.carryCut(deltaX);
+                session.cut.feed(deltaX, this.settings.swipeThresholdPx);
             }
-        } catch (error) {
-            gesture.effectBroken = true;
-            this.dropCut();
-            console.warn("Paragraph Swipe: the cut effect failed and was switched off for this gesture", error);
-            this.debugLog("the cut effect failed; the swipe itself keeps working");
+        } catch {
+            session.broken = true;
+            session.cut?.drop();
+            session.cut = null;
         }
     }
 
@@ -468,193 +221,76 @@ export default class ParagraphSwipePlugin extends Plugin {
      * swallows its own touchmove events, so the editor cannot scroll and the
      * block cannot drift away from the finger.
      */
-    private startCut(gesture: TouchGesture, deltaX: number): void {
-        this.dropCut();
-        const lookup = this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-        if (lookup.kind === "blank") {
-            this.debugLog(`the swipe started on a blank line (line ${lookup.line + 1}); nothing to cut out`);
-            return;
-        }
-        if (lookup.kind === "unresolved") {
-            this.debugLog(`cannot resolve the editor position under the finger; ${lookup.detail}`);
-            return;
+    private startEffect(session: SwipeSession, gesture: SwipeGesture, deltaX: number): void {
+        const lookup = this.transport.resolveParagraph(gesture.view, gesture.startX, gesture.startY);
+        if (lookup.kind !== "paragraph") {
+            return; // a blank line or an unresolvable position under the finger
         }
         // Remembered for the picker: the lines are about to move out from under
         // the start coordinates.
-        gesture.paragraph = lookup;
-        const { cut, reason } = SwipeCut.attach(
+        session.resolved = lookup.paragraph;
+        const cut = SwipeCut.attach(
             gesture.view,
-            lookup.range,
-            lookup.line,
+            lookup.paragraph.range,
+            lookup.paragraph.line,
             gesture.startX,
             gesture.startY,
         );
         if (cut === null) {
-            this.debugLog(
-                `the paragraph on lines ${lookup.range.start + 1}–${lookup.range.end} cannot be cut out (${reason})`,
-            );
             return;
         }
-        this.cut = cut;
-        this.carryCut(deltaX);
-        this.debugLog(
-            `the block on lines ${lookup.range.start + 1}–${lookup.range.end} was cut out (${lookup.strategy})`,
-        );
+        session.cut = cut;
+        cut.feed(deltaX, this.settings.swipeThresholdPx);
     }
 
-    /** Carries the block to the finger's position. A no-op without one. */
-    private carryCut(deltaX: number): void {
-        const cut = this.cut;
-        if (cut === null) {
-            return;
+    /** The threshold is crossed: the block leaves the note for good, the picker opens. */
+    private accept(gesture: SwipeGesture): void {
+        const session = this.sessionFor(gesture);
+        session.accepted = true;
+        session.cut?.detach();
+        session.cut = null;
+        try {
+            this.openPicker(session, gesture);
+        } catch (error) {
+            showError("internal error", error);
         }
-        cut.setShift(deltaX);
-        cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
-    }
-
-    /** The swipe was abandoned: the block glides back into its slot. */
-    private releaseCut(): void {
-        const cut = this.cut;
-        this.cut = null;
-        cut?.release();
-    }
-
-    /** The block was accepted: it flies off to the right and leaves. */
-    private detachCut(): void {
-        const cut = this.cut;
-        this.cut = null;
-        cut?.detach();
-    }
-
-    /** Snaps the block back at once, for when the text is about to move. */
-    private dropCut(): void {
-        const cut = this.cut;
-        this.cut = null;
-        cut?.drop();
-    }
-
-    /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
-    private isLeftDrawerOpen(): boolean {
-        return readObject(this.app.workspace, "leftSplit")?.collapsed === false;
-    }
-
-    /**
-     * Safety net: if the drawer gesture still managed to open the left sidebar
-     * during a claimed swipe (its listener may be registered earlier than
-     * ours), close it again — but only if the sidebar was closed when the
-     * gesture started, so a drawer opened deliberately is never touched.
-     */
-    private collapseLeftDrawerIfOpenedByGesture(gesture: TouchGesture): void {
-        if (gesture.leftDrawerOpenAtStart || !this.isLeftDrawerOpen()) {
-            return;
-        }
-        const leftSplit = readObject(this.app.workspace, "leftSplit");
-        if (leftSplit === null) {
-            return;
-        }
-        const collapse = readFunction(leftSplit, "collapse");
-        if (collapse !== null) {
-            collapse.call(leftSplit);
-        }
-    }
-
-    /**
-     * Finds the paragraph under the given viewport coordinates. Silent on
-     * purpose: the swipe must not spam the debug log, so only the picker
-     * reports why there is nothing to move.
-     */
-    private lookupParagraph(view: MarkdownView, x: number, y: number): ParagraphLookup {
-        const editor = view.editor;
-        const resolved = posAtClientPoint(editor, x, y);
-        if (resolved === null) {
-            return { kind: "unresolved", detail: describePositionStrategies(editor) };
-        }
-        const range = getParagraphRange(splitLines(editor.getValue()), resolved.position.line);
-        if (range === null) {
-            return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
-        }
-        return { kind: "paragraph", range, line: resolved.position.line, strategy: resolved.strategy };
     }
 
     /** Opens the note picker for the paragraph this gesture started on. */
-    private triggerSwipe(gesture: TouchGesture): void {
-        const view = gesture.view;
-        // The paragraph the cut effect resolved, or a fresh lookup for the rare
-        // flick that never got far enough to start one.
+    private openPicker(session: SwipeSession, gesture: SwipeGesture): void {
         const lookup: ParagraphLookup =
-            gesture.paragraph !== null
-                ? { kind: "paragraph", ...gesture.paragraph }
-                : this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-        if (lookup.kind === "unresolved") {
-            this.debugLog(
-                `cannot resolve the editor position at (${Math.round(gesture.startX)}, ${Math.round(gesture.startY)}); ${lookup.detail}`,
-            );
+            session.resolved !== null
+                ? { kind: "paragraph", paragraph: session.resolved }
+                : this.transport.resolveParagraph(gesture.view, gesture.startX, gesture.startY);
+        if (lookup.kind !== "paragraph") {
             return;
         }
-        if (lookup.kind === "blank") {
-            this.debugLog(
-                `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) — nothing to move`,
-            );
-            return;
-        }
-        const sourceFile = view.file;
+        const sourceFile = gesture.view.file;
         if (!sourceFile) {
-            this.debugLog("the note is not backed by a file; nothing to move");
             return;
         }
-        this.debugLog(
-            `opening the picker for the paragraph on lines ${lookup.range.start + 1}–${lookup.range.end} (via ${lookup.strategy})`,
-        );
         const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile: TFile) => {
-            void this.moveParagraph(view, lookup.range.start, targetFile).catch((error: unknown) => {
-                const message = describeError(error);
-                new Notice(`Paragraph Swipe: failed to move the paragraph — ${message}`);
-            });
+            void this.transport
+                .moveParagraph(gesture.view, lookup.paragraph.range.start, targetFile)
+                .catch((error: unknown) => {
+                    showError("failed to move the paragraph", error);
+                });
         });
         modal.open();
     }
 
-    private async moveParagraph(sourceView: MarkdownView, lineIndex: number, targetFile: TFile): Promise<void> {
-        const editor = sourceView.editor;
-        const sourceFile = sourceView.file;
-        if (!sourceFile || targetFile.path === sourceFile.path) {
-            this.debugLog("move aborted: no source file or the target equals the source");
-            return;
-        }
+    /** A claimed swipe finished below the threshold: the block glides back. */
+    private abandon(gesture: SwipeGesture): void {
+        this.sessionOf(gesture)?.cut?.release();
+        this.reset(gesture);
+    }
 
-        const linesBefore = splitLines(editor.getValue());
-        const rangeBefore = getParagraphRange(linesBefore, lineIndex);
-        if (rangeBefore === null) {
-            this.debugLog("move aborted: the paragraph disappeared before the pick");
-            return;
+    /** The text is about to move: the block snaps back at once. */
+    private reset(gesture: SwipeGesture): void {
+        const session = this.sessionOf(gesture);
+        if (session !== null) {
+            session.cut?.drop();
+            session.cut = null;
         }
-        const paragraph = joinLines(extractParagraphLines(linesBefore, rangeBefore));
-
-        // Append first: if anything below fails, the paragraph is duplicated (recoverable), never lost.
-        try {
-            await this.app.vault.process(targetFile, (data) =>
-                appendParagraphToText(normalizeLineEndings(data), paragraph),
-            );
-        } catch (error) {
-            const message = describeError(error);
-            new Notice(`Paragraph Swipe: could not update "${targetFile.basename}" — ${message}`);
-            return;
-        }
-
-        // Re-read the editor content: it may have changed while the modal was open.
-        const linesAfter = splitLines(editor.getValue());
-        const rangeAfter = getParagraphRange(linesAfter, lineIndex);
-        if (rangeAfter === null) {
-            this.debugLog("move aborted: the paragraph vanished from the source note");
-            return;
-        }
-        if (joinLines(extractParagraphLines(linesAfter, rangeAfter)) !== paragraph) {
-            this.debugLog("move aborted: the source paragraph changed while the picker was open");
-            return; // content drifted; do not risk deleting the wrong lines
-        }
-        const { from, to } = toCharRange(linesAfter, getDeletionRange(linesAfter, rangeAfter));
-        editor.replaceRange("", from, to);
-
-        new Notice(`Paragraph moved to "${targetFile.basename}".`);
     }
 }

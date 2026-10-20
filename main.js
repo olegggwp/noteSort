@@ -28,7 +28,7 @@ __export(main_exports, {
   default: () => ParagraphSwipePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/lib/coords.ts
 function isValidBounds(rect) {
@@ -75,8 +75,7 @@ function findVisibleLineIndexAtY(firstVisible, lastVisible, y, rectAt) {
 function safely(probe) {
   try {
     return probe();
-  } catch (error) {
-    console.warn("Paragraph Swipe: a runtime probe failed", error);
+  } catch (e) {
     return null;
   }
 }
@@ -179,87 +178,84 @@ function posAtClientPoint(editor, x, y) {
   const point = { x, y };
   const fromCodeMirror = posFromCodeMirrorView(editor, point);
   if (fromCodeMirror !== null) {
-    return { position: fromCodeMirror, strategy: "editor.cm.posAtCoords" };
+    return fromCodeMirror;
   }
   const fromWrapper = posFromEditorWrapper(editor, point);
   if (fromWrapper !== null) {
-    return { position: fromWrapper, strategy: "editor.posAtCoords" };
+    return fromWrapper;
   }
-  const fromScan = posFromLineScan(editor, y);
-  if (fromScan !== null) {
-    return { position: fromScan, strategy: "coordsAtPos line scan" };
-  }
-  return null;
-}
-function describePositionStrategies(editor) {
-  const wrapperPos = readFunction(editor, "posAtCoords") !== null;
-  const cm = readObject(editor, "cm");
-  const cmPos = cm === null ? null : readFunction(cm, "posAtCoords");
-  const coordsAtPos = readFunction(editor, "coordsAtPos") !== null;
-  const firstVisible = readNumber(editor, "getFirstVisibleLine");
-  const lastVisible = readNumber(editor, "getLastVisibleLine");
-  return [
-    `editor.posAtCoords: ${wrapperPos ? "yes" : "no"}`,
-    `editor.cm: ${cm === null ? "no" : "yes"}`,
-    `cm.posAtCoords: ${cmPos !== null ? "yes" : "no"}`,
-    `editor.coordsAtPos: ${coordsAtPos ? "yes" : "no"}`,
-    `visible lines: ${firstVisible}/${lastVisible}`
-  ].join(", ");
+  return posFromLineScan(editor, y);
 }
 function isEditorEditable(editor) {
   const getEditable = readFunction(editor, "getEditable");
   return getEditable === null ? true : Boolean(safely(() => getEditable.call(editor)));
 }
 
-// src/lib/gesture.ts
-var MIN_VERTICAL_TOLERANCE_PX = 24;
-var DECISION_DISTANCE_PX = 10;
-var DRAWER_EDGE_ZONE_PX = 32;
-function verticalTolerancePx(swipeThresholdPx) {
-  return Math.max(MIN_VERTICAL_TOLERANCE_PX, Math.round(swipeThresholdPx / 2));
+// src/lib/notify.ts
+var import_obsidian = require("obsidian");
+function describeError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
-function isCRAZYIntent(deltaX) {
-  return deltaX >= 1;
+function showError(title, error) {
+  new import_obsidian.Notice(`Paragraph Swipe: ${title} \u2014 ${describeError(error)}`);
 }
-function isDrawerZoneStart(startX) {
-  return Number.isFinite(startX) && startX <= DRAWER_EDGE_ZONE_PX;
+
+// src/note-picker-modal.ts
+var import_obsidian2 = require("obsidian");
+
+// src/lib/notes-search.ts
+function tokenizeQuery(query) {
+  return query.toLowerCase().split(/\s+/).filter((token) => token.length > 0);
 }
-function decisionDistancePx(startX) {
-  return isDrawerZoneStart(startX) ? 1 : DECISION_DISTANCE_PX;
-}
-function swipeProgress(deltaX, swipeThresholdPx) {
-  if (!Number.isFinite(deltaX) || deltaX <= 0) {
-    return 0;
+function parentFolderPath(path) {
+  const index = path.lastIndexOf("/");
+  if (index <= 0) {
+    return "/";
   }
-  const threshold = swipeThresholdPx > 0 ? swipeThresholdPx : 1;
-  return Math.pow(Math.min(1, deltaX / threshold), 0.6);
+  return path.slice(0, index);
 }
-function isRightwardSwipe(deltaX, deltaY, swipeThresholdPx) {
-  if (deltaX < swipeThresholdPx) {
-    return false;
-  }
-  return Math.abs(deltaY) <= verticalTolerancePx(swipeThresholdPx);
+function matchesAllTokens(path, tokens) {
+  return tokens.every((token) => path.includes(token));
 }
-function decideGesture(deltaX, deltaY, decisionDistancePxValue = DECISION_DISTANCE_PX) {
-  const absoluteX = Math.abs(deltaX);
-  const absoluteY = Math.abs(deltaY);
-  if (Math.max(absoluteX, absoluteY) < decisionDistancePxValue) {
-    return "undecided";
-  }
-  if (absoluteY > absoluteX) {
-    return "vertical";
-  }
-  return deltaX > 0 ? "rightward" : "leftward";
+function filterAndSortNotes(candidates, query) {
+  const tokens = tokenizeQuery(query);
+  const matching = tokens.length === 0 ? candidates.slice() : candidates.filter((candidate) => matchesAllTokens(candidate.path.toLowerCase(), tokens));
+  return matching.sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path));
 }
-function touchById(touches, identifier) {
-  for (let index = 0; index < touches.length; index += 1) {
-    const touch = touches[index];
-    if (touch.identifier === identifier) {
-      return touch;
-    }
+
+// src/note-picker-modal.ts
+var NotePickerModal = class extends import_obsidian2.SuggestModal {
+  constructor(app, sourcePath, onPick) {
+    super(app);
+    this.onPick = onPick;
+    this.candidates = app.vault.getMarkdownFiles().filter((file) => file.path !== sourcePath).map((file) => ({ file, path: file.path, mtime: file.stat.mtime }));
+    this.modalEl.addClass("paragraph-swipe-modal");
+    this.emptyStateText = "No notes found.";
+    this.setInstructions([
+      { command: "\u2191\u2193", purpose: "navigate" },
+      { command: "\u21B5", purpose: "move paragraph" },
+      { command: "esc", purpose: "dismiss" }
+    ]);
   }
-  return null;
-}
+  getSuggestions(query) {
+    return filterAndSortNotes(this.candidates, query).map((entry) => entry.file);
+  }
+  renderSuggestion(file, el) {
+    el.createDiv({ cls: "paragraph-swipe-suggestion-title", text: file.basename });
+    const folder = parentFolderPath(file.path);
+    const folderLabel = folder === "/" ? "" : `${folder} \xB7 `;
+    el.createDiv({
+      cls: "paragraph-swipe-suggestion-details",
+      text: `${folderLabel}${new Date(file.stat.mtime).toLocaleString()}`
+    });
+  }
+  onChooseSuggestion(file, _evt) {
+    this.onPick(file);
+  }
+};
+
+// src/paragraph-transport.ts
+var import_obsidian3 = require("obsidian");
 
 // src/lib/paragraph.ts
 function isBlankLine(line) {
@@ -345,65 +341,73 @@ function appendParagraphToText(target, paragraph) {
 ` : appended;
 }
 
-// src/note-picker-modal.ts
-var import_obsidian = require("obsidian");
-
-// src/lib/notes-search.ts
-function tokenizeQuery(query) {
-  return query.toLowerCase().split(/\s+/).filter((token) => token.length > 0);
-}
-function parentFolderPath(path) {
-  const index = path.lastIndexOf("/");
-  if (index <= 0) {
-    return "/";
+// src/paragraph-transport.ts
+var ParagraphTransport = class {
+  constructor(app) {
+    this.app = app;
   }
-  return path.slice(0, index);
-}
-function matchesAllTokens(path, tokens) {
-  return tokens.every((token) => path.includes(token));
-}
-function filterAndSortNotes(candidates, query) {
-  const tokens = tokenizeQuery(query);
-  const matching = tokens.length === 0 ? candidates.slice() : candidates.filter((candidate) => matchesAllTokens(candidate.path.toLowerCase(), tokens));
-  return matching.sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path));
-}
-
-// src/note-picker-modal.ts
-var NotePickerModal = class extends import_obsidian.SuggestModal {
-  constructor(app, sourcePath, onPick) {
-    super(app);
-    this.onPick = onPick;
-    this.candidates = app.vault.getMarkdownFiles().filter((file) => file.path !== sourcePath).map((file) => ({ file, path: file.path, mtime: file.stat.mtime }));
-    this.modalEl.addClass("paragraph-swipe-modal");
-    this.emptyStateText = "No notes found.";
-    this.setInstructions([
-      { command: "\u2191\u2193", purpose: "navigate" },
-      { command: "\u21B5", purpose: "move paragraph" },
-      { command: "esc", purpose: "dismiss" }
-    ]);
+  /**
+   * Finds the paragraph under the given viewport coordinates. Silent on
+   * purpose: swipes that miss must not interrupt the user, only the move
+   * reports its result.
+   */
+  resolveParagraph(view, x, y) {
+    const editor = view.editor;
+    const position = posAtClientPoint(editor, x, y);
+    if (position === null) {
+      return { kind: "unresolved" };
+    }
+    const range = getParagraphRange(splitLines(editor.getValue()), position.line);
+    if (range === null) {
+      return { kind: "blank" };
+    }
+    return { kind: "paragraph", paragraph: { range, line: position.line } };
   }
-  getSuggestions(query) {
-    return filterAndSortNotes(this.candidates, query).map((entry) => entry.file);
-  }
-  renderSuggestion(file, el) {
-    el.createDiv({ cls: "paragraph-swipe-suggestion-title", text: file.basename });
-    const folder = parentFolderPath(file.path);
-    const folderLabel = folder === "/" ? "" : `${folder} \xB7 `;
-    el.createDiv({
-      cls: "paragraph-swipe-suggestion-details",
-      text: `${folderLabel}${new Date(file.stat.mtime).toLocaleString()}`
-    });
-  }
-  onChooseSuggestion(file, _evt) {
-    this.onPick(file);
+  /**
+   * Moves the paragraph at `lineIndex` to the end of `targetFile` (separated
+   * by exactly one blank line) and cuts it out of the source together with
+   * one of the surrounding blank lines. Append runs first: if anything below
+   * it fails, the paragraph is duplicated (recoverable) and never lost.
+   */
+  async moveParagraph(sourceView, lineIndex, targetFile) {
+    const editor = sourceView.editor;
+    const sourceFile = sourceView.file;
+    if (!sourceFile || targetFile.path === sourceFile.path) {
+      return;
+    }
+    const linesBefore = splitLines(editor.getValue());
+    const rangeBefore = getParagraphRange(linesBefore, lineIndex);
+    if (rangeBefore === null) {
+      return;
+    }
+    const paragraph = joinLines(extractParagraphLines(linesBefore, rangeBefore));
+    try {
+      await this.app.vault.process(
+        targetFile,
+        (data) => appendParagraphToText(normalizeLineEndings(data), paragraph)
+      );
+    } catch (error) {
+      showError(`could not update "${targetFile.basename}"`, error);
+      return;
+    }
+    const linesAfter = splitLines(editor.getValue());
+    const rangeAfter = getParagraphRange(linesAfter, lineIndex);
+    if (rangeAfter === null) {
+      return;
+    }
+    if (joinLines(extractParagraphLines(linesAfter, rangeAfter)) !== paragraph) {
+      return;
+    }
+    const { from, to } = toCharRange(linesAfter, getDeletionRange(linesAfter, rangeAfter));
+    editor.replaceRange("", from, to);
+    new import_obsidian3.Notice(`Paragraph moved to "${targetFile.basename}".`);
   }
 };
 
 // src/settings.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 var DEFAULT_SETTINGS = {
-  swipeThresholdPx: 100,
-  debugMode: false
+  swipeThresholdPx: 100
 };
 var MIN_SWIPE_THRESHOLD_PX = 20;
 var MAX_SWIPE_THRESHOLD_PX = 600;
@@ -413,7 +417,7 @@ function clampSwipeThreshold(value) {
   }
   return Math.min(MAX_SWIPE_THRESHOLD_PX, Math.max(MIN_SWIPE_THRESHOLD_PX, Math.round(value)));
 }
-var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
+var ParagraphSwipeSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -437,15 +441,6 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
           max: MAX_SWIPE_THRESHOLD_PX,
           step: 10
         }
-      },
-      {
-        name: "Debug notices",
-        desc: "Show a toast at every step of the swipe pipeline to diagnose gesture problems.",
-        control: {
-          key: "debugMode",
-          type: "toggle",
-          defaultValue: DEFAULT_SETTINGS.debugMode
-        }
       }
     ];
   }
@@ -460,21 +455,14 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
   }
   /** Keeps the clamping semantics on the declarative path too. */
   async setControlValue(key, value) {
-    if (key === "swipeThresholdPx") {
-      if (!this.applyThreshold(value)) {
-        return;
-      }
-    } else if (key === "debugMode") {
-      this.plugin.settings.debugMode = value === true;
-    } else {
-      return;
+    if (key === "swipeThresholdPx" && this.applyThreshold(value)) {
+      await this.plugin.saveSettings();
     }
-    await this.plugin.saveSettings();
   }
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian2.Setting(containerEl).setName("Swipe threshold").setDesc(
+    new import_obsidian4.Setting(containerEl).setName("Swipe threshold").setDesc(
       "Minimum horizontal finger travel in pixels that opens the note picker when swiping right over a paragraph."
     ).addText((text) => {
       text.setPlaceholder(String(DEFAULT_SETTINGS.swipeThresholdPx));
@@ -491,16 +479,55 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
       });
       return text;
     });
-    new import_obsidian2.Setting(containerEl).setName("Debug notices").setDesc("Show a toast at every step of the swipe pipeline to diagnose gesture problems.").addToggle((toggle) => {
-      toggle.setValue(this.plugin.settings.debugMode);
-      toggle.onChange((value) => {
-        this.plugin.settings.debugMode = value;
-        void this.plugin.saveSettings();
-      });
-      return toggle;
-    });
   }
 };
+
+// src/lib/gesture.ts
+var MIN_VERTICAL_TOLERANCE_PX = 24;
+var DECISION_DISTANCE_PX = 10;
+var DRAWER_EDGE_ZONE_PX = 32;
+function verticalTolerancePx(swipeThresholdPx) {
+  return Math.max(MIN_VERTICAL_TOLERANCE_PX, Math.round(swipeThresholdPx / 2));
+}
+function isDrawerZoneStart(startX) {
+  return Number.isFinite(startX) && startX <= DRAWER_EDGE_ZONE_PX;
+}
+function decisionDistancePx(startX) {
+  return isDrawerZoneStart(startX) ? 1 : DECISION_DISTANCE_PX;
+}
+function swipeProgress(deltaX, swipeThresholdPx) {
+  if (!Number.isFinite(deltaX) || deltaX <= 0) {
+    return 0;
+  }
+  const threshold = swipeThresholdPx > 0 ? swipeThresholdPx : 1;
+  return Math.pow(Math.min(1, deltaX / threshold), 0.6);
+}
+function isRightwardSwipe(deltaX, deltaY, swipeThresholdPx) {
+  if (deltaX < swipeThresholdPx) {
+    return false;
+  }
+  return Math.abs(deltaY) <= verticalTolerancePx(swipeThresholdPx);
+}
+function decideGesture(deltaX, deltaY, decisionDistancePxValue = DECISION_DISTANCE_PX) {
+  const absoluteX = Math.abs(deltaX);
+  const absoluteY = Math.abs(deltaY);
+  if (Math.max(absoluteX, absoluteY) < decisionDistancePxValue) {
+    return "undecided";
+  }
+  if (absoluteY > absoluteX) {
+    return "vertical";
+  }
+  return deltaX > 0 ? "rightward" : "leftward";
+}
+function touchById(touches, identifier) {
+  for (let index = 0; index < touches.length; index += 1) {
+    const touch = touches[index];
+    if (touch.identifier === identifier) {
+      return touch;
+    }
+  }
+  return null;
+}
 
 // src/swipe-cut.ts
 var ACTIVE_CLASS = "paragraph-swipe-active";
@@ -542,15 +569,15 @@ function lineIndexAtPoint(lines, x, y) {
 function paragraphLines(view, range, fingerLine, probeX, probeY) {
   const container = contentElement(view);
   if (container === null) {
-    return "no-lines";
+    return null;
   }
   const lines = Array.from(container.querySelectorAll(".cm-line"));
   if (lines.length === 0) {
-    return "no-lines";
+    return null;
   }
   const fingerIndex = lineIndexAtPoint(lines, probeX, probeY);
   if (fingerIndex < 0) {
-    return "no-line-under-finger";
+    return null;
   }
   const count = range.end - range.start;
   const from = Math.max(0, fingerIndex - (fingerLine - range.start));
@@ -598,18 +625,17 @@ var SwipeCut = class _SwipeCut {
     this.plate = plate;
   }
   /**
-   * Cuts `range` out of `view`. Returns the effect, or the reason there is
-   * none — the caller logs it, because on a phone there is no other way to
-   * see why the effect did not come up.
+   * Cuts `range` out of `view`, or returns null when there is nothing to
+   * cut: no rendered lines, no element under the finger, no measurable box.
    */
   static attach(view, range, fingerLine, probeX, probeY) {
     const located = paragraphLines(view, range, fingerLine, probeX, probeY);
-    if (typeof located === "string") {
-      return { cut: null, reason: located };
+    if (located === null) {
+      return null;
     }
     const rect = unionRect(located);
     if (rect === null) {
-      return { cut: null, reason: "no-box" };
+      return null;
     }
     const root = editorRoot(view);
     const scroller = view.contentEl.querySelector(".cm-scroller");
@@ -620,7 +646,12 @@ var SwipeCut = class _SwipeCut {
       line.classList.add(LINE_CLASS);
     }
     root.classList.add(ACTIVE_CLASS);
-    return { cut: new _SwipeCut(located, root, scroller, slot, plate), reason: null };
+    return new _SwipeCut(located, root, scroller, slot, plate);
+  }
+  /** Carries the block to the finger: horizontal travel in px + the accepted threshold. */
+  feed(deltaX, thresholdPx) {
+    this.setShift(deltaX);
+    this.setProgress(swipeProgress(deltaX, thresholdPx));
   }
   /** Moves the block to follow the finger. Horizontal travel, in pixels. */
   setShift(deltaX) {
@@ -692,127 +723,24 @@ var SwipeCut = class _SwipeCut {
   }
 };
 
-// src/main.ts
-function describeError(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
-  constructor() {
-    super(...arguments);
-    this.settings = { ...DEFAULT_SETTINGS };
+// src/touch-claim.ts
+var TouchClaimTracker = class {
+  constructor(app, thresholdPx, handlers) {
+    this.app = app;
+    this.thresholdPx = thresholdPx;
+    this.handlers = handlers;
     this.gesture = null;
-    /** The paragraph being carried away by the swipe in progress, if any. */
-    this.cut = null;
-  }
-  async onload() {
-    await this.loadSettings();
-    this.debugLog(`loaded (threshold ${this.settings.swipeThresholdPx} px)`);
-    this.addSettingTab(new ParagraphSwipeSettingTab(this.app, this));
-    this.registerDomEvent(
-      window,
-      "touchstart",
-      (event) => {
-        this.onTouchStart(event);
-      },
-      { capture: true, passive: true }
-    );
-    this.registerDomEvent(
-      window,
-      "touchmove",
-      (event) => {
-        this.onTouchMove(event);
-      },
-      { capture: true, passive: false }
-    );
-    this.registerDomEvent(
-      window,
-      "touchend",
-      (event) => {
-        this.onTouchEnd(event);
-      },
-      { capture: true, passive: true }
-    );
-    this.registerDomEvent(
-      window,
-      "touchcancel",
-      (event) => {
-        this.onTouchCancel(event);
-      },
-      { capture: true, passive: true }
-    );
-    this.registerDomEvent(
-      window,
-      "scroll",
-      () => {
-        this.dropCut();
-      },
-      { capture: true, passive: true }
-    );
-    this.registerDomEvent(
-      window,
-      "pointermove",
-      (event) => {
-        this.onPointerMove(event);
-      },
-      { capture: true, passive: true }
-    );
-  }
-  onunload() {
-    this.gesture = null;
-    this.dropCut();
-  }
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
-  async loadSettings() {
-    const stored = await this.loadData();
-    this.settings = { ...DEFAULT_SETTINGS };
-    if (!isObject(stored)) {
-      return;
-    }
-    const threshold = stored["swipeThresholdPx"];
-    if (typeof threshold === "number" && Number.isFinite(threshold)) {
-      this.settings.swipeThresholdPx = clampSwipeThreshold(threshold);
-    }
-    if (typeof stored["debugMode"] === "boolean") {
-      this.settings.debugMode = stored["debugMode"];
-    }
-  }
-  /** Logs to the console and toasts, both only while debug mode is on. */
-  debugLog(message) {
-    if (!this.settings.debugMode) {
-      return;
-    }
-    console.log(`Paragraph Swipe: ${message}`);
-    new import_obsidian3.Notice(`Paragraph Swipe: ${message}`, 8e3);
-  }
-  isEditableSourceView(view) {
-    return view.getMode() === "source" && isEditorEditable(view.editor);
-  }
-  /**
-   * Finds the editable source-mode MarkdownView that contains the touched
-   * element. The active view is checked first; the loop over all markdown
-   * leaves covers swipes in unfocused split panes.
-   */
-  findSourceMarkdownView(target) {
-    const active = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
-    if (active !== null && this.isEditableSourceView(active) && active.contentEl.contains(target)) {
-      return active;
-    }
-    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-      const view = leaf.view;
-      if (view instanceof import_obsidian3.MarkdownView && this.isEditableSourceView(view) && view.contentEl.contains(target)) {
-        return view;
-      }
-    }
-    return null;
   }
   onTouchStart(event) {
-    if (this.gesture !== null && this.gesture.claimed && event.touches.length > 1) {
+    var _a;
+    const previous = this.gesture;
+    if (previous !== null && previous.claimed && event.touches.length > 1) {
       return;
     }
     this.gesture = null;
-    this.dropCut();
+    if (previous !== null) {
+      this.handlers.onReset(previous);
+    }
     const touch = event.touches[0];
     if (event.touches.length !== 1 || touch === void 0) {
       return;
@@ -825,23 +753,19 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     if (selection !== null && !selection.isCollapsed) {
       return;
     }
-    const view = this.findSourceMarkdownView(target);
+    const view = this.handlers.findEditableView(target);
     if (view === null) {
       return;
     }
     this.gesture = {
       touchId: touch.identifier,
+      view,
       startX: touch.clientX,
       startY: touch.clientY,
-      view,
-      leftDrawerOpenAtStart: this.isLeftDrawerOpen(),
+      leftDrawerOpenAtStart: ((_a = readObject(this.app.workspace, "leftSplit")) == null ? void 0 : _a.collapsed) === false,
       claimed: false,
       released: false,
-      consumed: false,
-      claimedMoves: 0,
-      lastDeltaX: 0,
-      paragraph: null,
-      effectBroken: false
+      accepted: false
     };
   }
   onTouchMove(event) {
@@ -853,36 +777,42 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     if (touch === null) {
       return;
     }
+    const threshold = this.thresholdPx();
     if (gesture.claimed) {
-      this.swallowTouch(event);
-      gesture.claimedMoves += 1;
+      this.swallow(event);
       const deltaX2 = touch.clientX - gesture.startX;
-      gesture.lastDeltaX = deltaX2;
-      this.feedCut(gesture, deltaX2);
-      this.consumeAtThreshold(gesture, deltaX2);
+      this.handlers.onTravel(gesture, deltaX2);
+      if (!gesture.accepted && deltaX2 >= threshold) {
+        gesture.accepted = true;
+        this.handlers.onAccepted(gesture);
+      }
       return;
     }
     if (event.touches.length !== 1) {
       gesture.released = true;
-      this.dropCut();
+      this.gesture = null;
+      this.handlers.onReset(gesture);
       return;
     }
     const deltaX = touch.clientX - gesture.startX;
     const deltaY = touch.clientY - gesture.startY;
     const decision = decideGesture(deltaX, deltaY, decisionDistancePx(gesture.startX));
-    this.feedCut(gesture, deltaX);
+    this.handlers.onTravel(gesture, deltaX);
     if (decision === "undecided") {
       return;
     }
     if (decision !== "rightward") {
       gesture.released = true;
-      this.dropCut();
+      this.gesture = null;
+      this.handlers.onReset(gesture);
       return;
     }
     gesture.claimed = true;
-    this.swallowTouch(event);
-    this.debugLog(`swipe claimed (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px)`);
-    this.consumeAtThreshold(gesture, deltaX);
+    this.swallow(event);
+    if (deltaX >= threshold) {
+      gesture.accepted = true;
+      this.handlers.onAccepted(gesture);
+    }
   }
   onTouchEnd(event) {
     const gesture = this.gesture;
@@ -891,125 +821,242 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     const touch = touchById(event.changedTouches, gesture.touchId);
     if (touch === null) {
-      this.dropCut();
+      this.gesture = null;
+      this.handlers.onReset(gesture);
       return;
     }
     this.gesture = null;
     const deltaX = touch.clientX - gesture.startX;
     const deltaY = touch.clientY - gesture.startY;
     if (gesture.claimed) {
-      this.swallowTouch(event);
-      if (gesture.consumed) {
-        this.dropCut();
-      } else if (this.consumeAtThreshold(gesture, deltaX)) {
-        this.debugLog(
-          `the picker opened from the end event (dx ${Math.round(deltaX)} px; ${gesture.claimedMoves} move event(s) received after the claim)`
-        );
+      this.swallow(event);
+      if (gesture.accepted) {
+        this.handlers.onReset(gesture);
       } else {
-        this.debugLog(
-          `swipe ended below the threshold (dx ${Math.round(deltaX)} px, dy ${Math.round(deltaY)} px, threshold ${this.settings.swipeThresholdPx} px, ${gesture.claimedMoves} move event(s) received)`
-        );
-        this.releaseCut();
+        if (deltaX >= this.thresholdPx()) {
+          gesture.accepted = true;
+          this.handlers.onAccepted(gesture);
+        } else {
+          this.handlers.onAbandoned(gesture);
+        }
       }
-      this.collapseLeftDrawerIfOpenedByGesture(gesture);
+      this.collapseDrawerIfOpenedByGesture(gesture);
       return;
     }
-    if (gesture.released || gesture.consumed) {
-      this.releaseCut();
+    if (gesture.released || gesture.accepted) {
       return;
     }
-    if (decideGesture(deltaX, deltaY) === "rightward" && isRightwardSwipe(deltaX, deltaY, this.settings.swipeThresholdPx)) {
-      this.openPickerSafely(gesture);
-    } else {
-      this.releaseCut();
+    if (decideGesture(deltaX, deltaY) === "rightward" && isRightwardSwipe(deltaX, deltaY, this.thresholdPx())) {
+      this.handlers.onAccepted(gesture);
     }
   }
   onTouchCancel(event) {
     const gesture = this.gesture;
     this.gesture = null;
-    this.dropCut();
-    if (gesture !== null && gesture.claimed) {
-      this.swallowTouch(event);
-      if (!gesture.consumed) {
-        this.debugLog(
-          `the system cancelled the swipe after the claim (${gesture.claimedMoves} move event(s) received, last dx ${Math.round(gesture.lastDeltaX)} px)`
-        );
-      }
-      this.collapseLeftDrawerIfOpenedByGesture(gesture);
+    if (gesture === null) {
+      return;
     }
+    this.handlers.onReset(gesture);
+    if (gesture.claimed) {
+      this.swallow(event);
+      this.collapseDrawerIfOpenedByGesture(gesture);
+    }
+  }
+  onPointerMove(event) {
+    const gesture = this.gesture;
+    if (gesture === null || gesture.released || !event.isPrimary) {
+      return;
+    }
+    this.handlers.onCarry(gesture, event.clientX - gesture.startX);
   }
   /**
    * Hides the remaining events of a claimed gesture from the app and from
-   * CodeMirror, so the built-in swipe-to-open-sidebar gesture is not
+   * CodeMirror, so the built-in swipe-to-open-drawer gesture is not
    * triggered and no stray click is synthesized.
    */
-  swallowTouch(event) {
+  swallow(event) {
     event.stopImmediatePropagation();
     event.preventDefault();
   }
   /**
-   * The claim moment and every later touchmove re-check the threshold, and
-   * touchend checks it once more (some WebView builds stop delivering
-   * touchmove events once a gesture is claimed). Fires at most once.
+   * Safety net: if the drawer gesture still managed to open the left sidebar
+   * during a claimed swipe (its listener may be registered earlier than
+   * ours), close it again — but only if the sidebar was closed when the
+   * gesture started, so a drawer opened deliberately is never touched.
    */
-  consumeAtThreshold(gesture, deltaX) {
-    if (gesture.consumed || deltaX < this.settings.swipeThresholdPx) {
-      return false;
+  collapseDrawerIfOpenedByGesture(gesture) {
+    if (gesture.leftDrawerOpenAtStart) {
+      return;
     }
-    gesture.consumed = true;
-    this.openPickerSafely(gesture);
-    return true;
+    const leftSplit = readObject(this.app.workspace, "leftSplit");
+    if (leftSplit === null || leftSplit["collapsed"] !== false) {
+      return;
+    }
+    const collapse = readFunction(leftSplit, "collapse");
+    if (collapse !== null) {
+      collapse.call(leftSplit);
+    }
   }
-  /** Calls triggerSwipe, converting any unexpected exception into a visible notice. */
-  openPickerSafely(gesture) {
-    this.detachCut();
-    try {
-      this.triggerSwipe(gesture);
-    } catch (error) {
-      const message = describeError(error);
-      console.error("Paragraph Swipe: failed to open the picker", error);
-      new import_obsidian3.Notice(`Paragraph Swipe: internal error \u2014 ${message}`);
+};
+
+// src/main.ts
+function isEditableSourceView(view) {
+  return view.getMode() === "source" && isEditorEditable(view.editor);
+}
+var ParagraphSwipePlugin = class extends import_obsidian5.Plugin {
+  constructor() {
+    super(...arguments);
+    this.settings = { ...DEFAULT_SETTINGS };
+    /** Effect state of each gesture, dying with the gesture object itself. */
+    this.sessions = /* @__PURE__ */ new WeakMap();
+    /** The session of the gesture seen last: the scroll safety net uses it. */
+    this.currentSession = null;
+  }
+  async onload() {
+    await this.loadSettings();
+    this.addSettingTab(new ParagraphSwipeSettingTab(this.app, this));
+    this.transport = new ParagraphTransport(this.app);
+    this.tracker = new TouchClaimTracker(this.app, () => this.settings.swipeThresholdPx, {
+      findEditableView: (target) => this.findEditableView(target),
+      onTravel: (gesture, deltaX) => this.travel(gesture, deltaX, false),
+      onCarry: (gesture, deltaX) => this.travel(gesture, deltaX, true),
+      onAccepted: (gesture) => this.accept(gesture),
+      onAbandoned: (gesture) => this.abandon(gesture),
+      onReset: (gesture) => this.reset(gesture)
+    });
+    this.registerDomEvent(
+      window,
+      "touchstart",
+      (event) => {
+        this.tracker.onTouchStart(event);
+      },
+      { capture: true, passive: true }
+    );
+    this.registerDomEvent(
+      window,
+      "touchmove",
+      (event) => {
+        this.tracker.onTouchMove(event);
+      },
+      { capture: true, passive: false }
+    );
+    this.registerDomEvent(
+      window,
+      "touchend",
+      (event) => {
+        this.tracker.onTouchEnd(event);
+      },
+      { capture: true, passive: true }
+    );
+    this.registerDomEvent(
+      window,
+      "touchcancel",
+      (event) => {
+        this.tracker.onTouchCancel(event);
+      },
+      { capture: true, passive: true }
+    );
+    this.registerDomEvent(
+      window,
+      "pointermove",
+      (event) => {
+        this.tracker.onPointerMove(event);
+      },
+      { capture: true, passive: true }
+    );
+    this.registerDomEvent(
+      window,
+      "scroll",
+      () => {
+        var _a, _b;
+        (_b = (_a = this.currentSession) == null ? void 0 : _a.cut) == null ? void 0 : _b.drop();
+      },
+      { capture: true, passive: true }
+    );
+  }
+  onunload() {
+    var _a, _b;
+    (_b = (_a = this.currentSession) == null ? void 0 : _a.cut) == null ? void 0 : _b.drop();
+    this.currentSession = null;
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+  async loadSettings() {
+    const stored = await this.loadData();
+    this.settings = { ...DEFAULT_SETTINGS };
+    if (typeof stored !== "object" || stored === null) {
+      return;
+    }
+    const threshold = stored["swipeThresholdPx"];
+    if (typeof threshold === "number" && Number.isFinite(threshold)) {
+      this.settings.swipeThresholdPx = clampSwipeThreshold(threshold);
     }
   }
   /**
-   * Progress channel for the effect: a pointermove only ever moves the block
-   * along, it never claims or swallows anything. Gestures only start from a
-   * touchstart, so there is nothing to do without one.
+   * Finds the editable source-mode MarkdownView that contains the touched
+   * element. The active view is checked first; the loop over all markdown
+   * leaves covers swipes in unfocused split panes.
    */
-  onPointerMove(event) {
-    const gesture = this.gesture;
-    if (gesture === null || gesture.released || this.cut === null || !event.isPrimary) {
-      return;
+  findEditableView(target) {
+    const active = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
+    if (active !== null && isEditableSourceView(active) && active.contentEl.contains(target)) {
+      return active;
     }
-    const deltaX = event.clientX - gesture.startX;
-    gesture.lastDeltaX = deltaX;
-    this.feedCut(gesture, deltaX);
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (view instanceof import_obsidian5.MarkdownView && isEditableSourceView(view) && view.contentEl.contains(target)) {
+        return view;
+      }
+    }
+    return null;
   }
   /**
-   * Starts the effect if it is not up yet and carries it to the finger. The
-   * whole feedback is optional: an exception in it must not abort the
-   * touchmove handler, or the gesture would never be claimed and the app's own
-   * edge gestures would take over. One failure disables it for the rest of
-   * the gesture instead of repeating it on every move.
+   * Collects (or opens) the effect state of a gesture. The per-gesture map
+   * keeps the state from outliving its gesture: every terminal event of the
+   * tracker is handled through the same object until the gesture object
+   * itself dies.
    */
-  feedCut(gesture, deltaX) {
-    if (gesture.effectBroken || gesture.consumed) {
+  sessionFor(gesture) {
+    let session = this.sessions.get(gesture);
+    if (session === void 0) {
+      session = { resolved: null, cut: null, broken: false, accepted: false };
+      this.sessions.set(gesture, session);
+      this.currentSession = session;
+    }
+    return session;
+  }
+  sessionOf(gesture) {
+    var _a;
+    return (_a = this.sessions.get(gesture)) != null ? _a : null;
+  }
+  /**
+   * Carries the effect along the swipe. Touch travel may start the effect
+   * (the block leaves the note at the very first pixel of rightward travel,
+   * well before the claim); pointer travel may only feed a started block,
+   * because the pointer channel runs independently of the touch pipeline
+   * and must never claim anything on its own. The whole feedback is
+   * optional: one exception disables it for the rest of the gesture.
+   */
+  travel(gesture, deltaX, fromPointer) {
+    var _a;
+    const session = this.sessionFor(gesture);
+    if (session.broken || session.accepted) {
       return;
     }
     try {
-      if (this.cut === null) {
-        if (!isCRAZYIntent(deltaX)) {
+      if (session.cut === null) {
+        if (fromPointer || deltaX < 1) {
           return;
         }
-        this.startCut(gesture, deltaX);
+        this.startEffect(session, gesture, deltaX);
       } else {
-        this.carryCut(deltaX);
+        session.cut.feed(deltaX, this.settings.swipeThresholdPx);
       }
-    } catch (error) {
-      gesture.effectBroken = true;
-      this.dropCut();
-      console.warn("Paragraph Swipe: the cut effect failed and was switched off for this gesture", error);
-      this.debugLog("the cut effect failed; the swipe itself keeps working");
+    } catch (e) {
+      session.broken = true;
+      (_a = session.cut) == null ? void 0 : _a.drop();
+      session.cut = null;
     }
   }
   /**
@@ -1018,173 +1065,68 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
    * swallows its own touchmove events, so the editor cannot scroll and the
    * block cannot drift away from the finger.
    */
-  startCut(gesture, deltaX) {
-    this.dropCut();
-    const lookup = this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-    if (lookup.kind === "blank") {
-      this.debugLog(`the swipe started on a blank line (line ${lookup.line + 1}); nothing to cut out`);
+  startEffect(session, gesture, deltaX) {
+    const lookup = this.transport.resolveParagraph(gesture.view, gesture.startX, gesture.startY);
+    if (lookup.kind !== "paragraph") {
       return;
     }
-    if (lookup.kind === "unresolved") {
-      this.debugLog(`cannot resolve the editor position under the finger; ${lookup.detail}`);
-      return;
-    }
-    gesture.paragraph = lookup;
-    const { cut, reason } = SwipeCut.attach(
+    session.resolved = lookup.paragraph;
+    const cut = SwipeCut.attach(
       gesture.view,
-      lookup.range,
-      lookup.line,
+      lookup.paragraph.range,
+      lookup.paragraph.line,
       gesture.startX,
       gesture.startY
     );
     if (cut === null) {
-      this.debugLog(
-        `the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end} cannot be cut out (${reason})`
-      );
       return;
     }
-    this.cut = cut;
-    this.carryCut(deltaX);
-    this.debugLog(
-      `the block on lines ${lookup.range.start + 1}\u2013${lookup.range.end} was cut out (${lookup.strategy})`
-    );
+    session.cut = cut;
+    cut.feed(deltaX, this.settings.swipeThresholdPx);
   }
-  /** Carries the block to the finger's position. A no-op without one. */
-  carryCut(deltaX) {
-    const cut = this.cut;
-    if (cut === null) {
-      return;
-    }
-    cut.setShift(deltaX);
-    cut.setProgress(swipeProgress(deltaX, this.settings.swipeThresholdPx));
-  }
-  /** The swipe was abandoned: the block glides back into its slot. */
-  releaseCut() {
-    const cut = this.cut;
-    this.cut = null;
-    cut == null ? void 0 : cut.release();
-  }
-  /** The block was accepted: it flies off to the right and leaves. */
-  detachCut() {
-    const cut = this.cut;
-    this.cut = null;
-    cut == null ? void 0 : cut.detach();
-  }
-  /** Snaps the block back at once, for when the text is about to move. */
-  dropCut() {
-    const cut = this.cut;
-    this.cut = null;
-    cut == null ? void 0 : cut.drop();
-  }
-  /** Runtime probe: `leftSplit.collapsed` differs between typings releases. */
-  isLeftDrawerOpen() {
+  /** The threshold is crossed: the block leaves the note for good, the picker opens. */
+  accept(gesture) {
     var _a;
-    return ((_a = readObject(this.app.workspace, "leftSplit")) == null ? void 0 : _a.collapsed) === false;
-  }
-  /**
-   * Safety net: if the drawer gesture still managed to open the left sidebar
-   * during a claimed swipe (its listener may be registered earlier than
-   * ours), close it again — but only if the sidebar was closed when the
-   * gesture started, so a drawer opened deliberately is never touched.
-   */
-  collapseLeftDrawerIfOpenedByGesture(gesture) {
-    if (gesture.leftDrawerOpenAtStart || !this.isLeftDrawerOpen()) {
-      return;
+    const session = this.sessionFor(gesture);
+    session.accepted = true;
+    (_a = session.cut) == null ? void 0 : _a.detach();
+    session.cut = null;
+    try {
+      this.openPicker(session, gesture);
+    } catch (error) {
+      showError("internal error", error);
     }
-    const leftSplit = readObject(this.app.workspace, "leftSplit");
-    if (leftSplit === null) {
-      return;
-    }
-    const collapse = readFunction(leftSplit, "collapse");
-    if (collapse !== null) {
-      collapse.call(leftSplit);
-    }
-  }
-  /**
-   * Finds the paragraph under the given viewport coordinates. Silent on
-   * purpose: the swipe must not spam the debug log, so only the picker
-   * reports why there is nothing to move.
-   */
-  lookupParagraph(view, x, y) {
-    const editor = view.editor;
-    const resolved = posAtClientPoint(editor, x, y);
-    if (resolved === null) {
-      return { kind: "unresolved", detail: describePositionStrategies(editor) };
-    }
-    const range = getParagraphRange(splitLines(editor.getValue()), resolved.position.line);
-    if (range === null) {
-      return { kind: "blank", line: resolved.position.line, strategy: resolved.strategy };
-    }
-    return { kind: "paragraph", range, line: resolved.position.line, strategy: resolved.strategy };
   }
   /** Opens the note picker for the paragraph this gesture started on. */
-  triggerSwipe(gesture) {
-    const view = gesture.view;
-    const lookup = gesture.paragraph !== null ? { kind: "paragraph", ...gesture.paragraph } : this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-    if (lookup.kind === "unresolved") {
-      this.debugLog(
-        `cannot resolve the editor position at (${Math.round(gesture.startX)}, ${Math.round(gesture.startY)}); ${lookup.detail}`
-      );
+  openPicker(session, gesture) {
+    const lookup = session.resolved !== null ? { kind: "paragraph", paragraph: session.resolved } : this.transport.resolveParagraph(gesture.view, gesture.startX, gesture.startY);
+    if (lookup.kind !== "paragraph") {
       return;
     }
-    if (lookup.kind === "blank") {
-      this.debugLog(
-        `the swipe started on a blank line (line ${lookup.line + 1}, via ${lookup.strategy}) \u2014 nothing to move`
-      );
-      return;
-    }
-    const sourceFile = view.file;
+    const sourceFile = gesture.view.file;
     if (!sourceFile) {
-      this.debugLog("the note is not backed by a file; nothing to move");
       return;
     }
-    this.debugLog(
-      `opening the picker for the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end} (via ${lookup.strategy})`
-    );
     const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile) => {
-      void this.moveParagraph(view, lookup.range.start, targetFile).catch((error) => {
-        const message = describeError(error);
-        new import_obsidian3.Notice(`Paragraph Swipe: failed to move the paragraph \u2014 ${message}`);
+      void this.transport.moveParagraph(gesture.view, lookup.paragraph.range.start, targetFile).catch((error) => {
+        showError("failed to move the paragraph", error);
       });
     });
     modal.open();
   }
-  async moveParagraph(sourceView, lineIndex, targetFile) {
-    const editor = sourceView.editor;
-    const sourceFile = sourceView.file;
-    if (!sourceFile || targetFile.path === sourceFile.path) {
-      this.debugLog("move aborted: no source file or the target equals the source");
-      return;
+  /** A claimed swipe finished below the threshold: the block glides back. */
+  abandon(gesture) {
+    var _a, _b;
+    (_b = (_a = this.sessionOf(gesture)) == null ? void 0 : _a.cut) == null ? void 0 : _b.release();
+    this.reset(gesture);
+  }
+  /** The text is about to move: the block snaps back at once. */
+  reset(gesture) {
+    var _a;
+    const session = this.sessionOf(gesture);
+    if (session !== null) {
+      (_a = session.cut) == null ? void 0 : _a.drop();
+      session.cut = null;
     }
-    const linesBefore = splitLines(editor.getValue());
-    const rangeBefore = getParagraphRange(linesBefore, lineIndex);
-    if (rangeBefore === null) {
-      this.debugLog("move aborted: the paragraph disappeared before the pick");
-      return;
-    }
-    const paragraph = joinLines(extractParagraphLines(linesBefore, rangeBefore));
-    try {
-      await this.app.vault.process(
-        targetFile,
-        (data) => appendParagraphToText(normalizeLineEndings(data), paragraph)
-      );
-    } catch (error) {
-      const message = describeError(error);
-      new import_obsidian3.Notice(`Paragraph Swipe: could not update "${targetFile.basename}" \u2014 ${message}`);
-      return;
-    }
-    const linesAfter = splitLines(editor.getValue());
-    const rangeAfter = getParagraphRange(linesAfter, lineIndex);
-    if (rangeAfter === null) {
-      this.debugLog("move aborted: the paragraph vanished from the source note");
-      return;
-    }
-    if (joinLines(extractParagraphLines(linesAfter, rangeAfter)) !== paragraph) {
-      this.debugLog("move aborted: the source paragraph changed while the picker was open");
-      return;
-    }
-    const { from, to } = toCharRange(linesAfter, getDeletionRange(linesAfter, rangeAfter));
-    editor.replaceRange("", from, to);
-    new import_obsidian3.Notice(`Paragraph moved to "${targetFile.basename}".`);
   }
 };

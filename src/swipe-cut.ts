@@ -1,5 +1,6 @@
 import { MarkdownView } from "obsidian";
 
+import { swipeProgress } from "./lib/gesture";
 import type { ParagraphRange } from "./lib/paragraph";
 import { readElement, readObject, safely } from "./lib/runtime-probe";
 
@@ -65,12 +66,6 @@ interface SwipeRect {
     readonly right: number;
 }
 
-/** Why a paragraph could not be turned into a travelling block. */
-type LocateFailure = "no-lines" | "no-line-under-finger" | "no-box";
-
-/** The result of trying to cut a paragraph out: the effect, or the reason. */
-export type CutResult = { readonly cut: SwipeCut; readonly reason: null } | { readonly cut: null; readonly reason: LocateFailure };
-
 function clampProgress(value: number): number {
     if (!Number.isFinite(value)) {
         return 0;
@@ -107,7 +102,7 @@ function lineIndexAtPoint(lines: readonly HTMLElement[], x: number, y: number): 
 }
 
 /**
- * The rendered lines of a paragraph, or the reason they cannot be found.
+ * The rendered lines of a paragraph, or null when they cannot be found.
  *
  * One CodeMirror document line is exactly one `.cm-line` element (text that
  * wraps lives inside its own element), and the rendered ones are in document
@@ -128,18 +123,18 @@ function paragraphLines(
     fingerLine: number,
     probeX: number,
     probeY: number,
-): readonly HTMLElement[] | LocateFailure {
+): readonly HTMLElement[] | null {
     const container = contentElement(view);
     if (container === null) {
-        return "no-lines";
+        return null;
     }
     const lines = Array.from(container.querySelectorAll<HTMLElement>(".cm-line"));
     if (lines.length === 0) {
-        return "no-lines";
+        return null;
     }
     const fingerIndex = lineIndexAtPoint(lines, probeX, probeY);
     if (fingerIndex < 0) {
-        return "no-line-under-finger";
+        return null;
     }
     const count = range.end - range.start;
     const from = Math.max(0, fingerIndex - (fingerLine - range.start));
@@ -212,9 +207,8 @@ export class SwipeCut {
     }
 
     /**
-     * Cuts `range` out of `view`. Returns the effect, or the reason there is
-     * none — the caller logs it, because on a phone there is no other way to
-     * see why the effect did not come up.
+     * Cuts `range` out of `view`, or returns null when there is nothing to
+     * cut: no rendered lines, no element under the finger, no measurable box.
      */
     public static attach(
         view: MarkdownView,
@@ -222,14 +216,14 @@ export class SwipeCut {
         fingerLine: number,
         probeX: number,
         probeY: number,
-    ): CutResult {
+    ): SwipeCut | null {
         const located = paragraphLines(view, range, fingerLine, probeX, probeY);
-        if (typeof located === "string") {
-            return { cut: null, reason: located };
+        if (located === null) {
+            return null;
         }
         const rect = unionRect(located);
         if (rect === null) {
-            return { cut: null, reason: "no-box" };
+            return null;
         }
         const root = editorRoot(view);
         // Translating the lines would otherwise make the scroller scrollable
@@ -244,11 +238,17 @@ export class SwipeCut {
             line.classList.add(LINE_CLASS);
         }
         root.classList.add(ACTIVE_CLASS);
-        return { cut: new SwipeCut(located, root, scroller, slot, plate), reason: null };
+        return new SwipeCut(located, root, scroller, slot, plate);
+    }
+
+    /** Carries the block to the finger: horizontal travel in px + the accepted threshold. */
+    public feed(deltaX: number, thresholdPx: number): void {
+        this.setShift(deltaX);
+        this.setProgress(swipeProgress(deltaX, thresholdPx));
     }
 
     /** Moves the block to follow the finger. Horizontal travel, in pixels. */
-    public setShift(deltaX: number): void {
+    private setShift(deltaX: number): void {
         if (this.finished) {
             return;
         }
@@ -261,7 +261,7 @@ export class SwipeCut {
      * Scales the effect: 0 is the first pixel of the swipe, 1 the threshold —
      * the point at which the paragraph really moves.
      */
-    public setProgress(progress: number): void {
+    private setProgress(progress: number): void {
         if (this.finished) {
             return;
         }

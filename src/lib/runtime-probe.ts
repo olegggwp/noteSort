@@ -13,8 +13,7 @@
 export function safely<T>(probe: () => T): T | null {
     try {
         return probe();
-    } catch (error) {
-        console.warn("Paragraph Swipe: a runtime probe failed", error);
+    } catch {
         return null;
     }
 }

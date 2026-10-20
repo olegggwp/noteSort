@@ -30,12 +30,6 @@ interface ScreenPoint {
     readonly y: number;
 }
 
-/** An editor position together with the name of the strategy that found it. */
-export interface ResolvedPosition {
-    readonly position: EditorPosition;
-    readonly strategy: string;
-}
-
 /** Validates an unknown value as an editor position. */
 function asEditorPosition(value: unknown): EditorPosition | null {
     if (!isObject(value)) {
@@ -115,7 +109,7 @@ function posFromLineScan(editor: Editor, y: number): EditorPosition | null {
  * Resolves the editor position displayed at the given viewport coordinates,
  * or null if none of the strategies can determine it.
  */
-export function posAtClientPoint(editor: Editor, x: number, y: number): ResolvedPosition | null {
+export function posAtClientPoint(editor: Editor, x: number, y: number): EditorPosition | null {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
         return null;
     }
@@ -127,37 +121,13 @@ export function posAtClientPoint(editor: Editor, x: number, y: number): Resolved
     // what the rendered viewport actually shows.
     const fromCodeMirror = posFromCodeMirrorView(editor, point);
     if (fromCodeMirror !== null) {
-        return { position: fromCodeMirror, strategy: "editor.cm.posAtCoords" };
+        return fromCodeMirror;
     }
     const fromWrapper = posFromEditorWrapper(editor, point);
     if (fromWrapper !== null) {
-        return { position: fromWrapper, strategy: "editor.posAtCoords" };
+        return fromWrapper;
     }
-    const fromScan = posFromLineScan(editor, y);
-    if (fromScan !== null) {
-        return { position: fromScan, strategy: "coordsAtPos line scan" };
-    }
-    return null;
-}
-
-/**
- * Human-readable availability of the runtime members the strategies rely on;
- * used by the debug notices to diagnose position-resolution failures.
- */
-export function describePositionStrategies(editor: Editor): string {
-    const wrapperPos = readFunction(editor, "posAtCoords") !== null;
-    const cm = readObject(editor, "cm");
-    const cmPos = cm === null ? null : readFunction(cm, "posAtCoords");
-    const coordsAtPos = readFunction(editor, "coordsAtPos") !== null;
-    const firstVisible = readNumber(editor, "getFirstVisibleLine");
-    const lastVisible = readNumber(editor, "getLastVisibleLine");
-    return [
-        `editor.posAtCoords: ${wrapperPos ? "yes" : "no"}`,
-        `editor.cm: ${cm === null ? "no" : "yes"}`,
-        `cm.posAtCoords: ${cmPos !== null ? "yes" : "no"}`,
-        `editor.coordsAtPos: ${coordsAtPos ? "yes" : "no"}`,
-        `visible lines: ${firstVisible}/${lastVisible}`,
-    ].join(", ");
+    return posFromLineScan(editor, y);
 }
 
 /**

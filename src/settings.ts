@@ -5,13 +5,10 @@ import type ParagraphSwipePlugin from "./main";
 export interface ParagraphSwipeSettings {
     /** Minimum horizontal finger travel, in pixels, recognized as a swipe. */
     swipeThresholdPx: number;
-    /** Show a notice at every step of the swipe pipeline (for diagnostics). */
-    debugMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: ParagraphSwipeSettings = {
     swipeThresholdPx: 100,
-    debugMode: false,
 };
 
 export const MIN_SWIPE_THRESHOLD_PX = 20;
@@ -52,15 +49,6 @@ export class ParagraphSwipeSettingTab extends PluginSettingTab {
                     step: 10,
                 },
             },
-            {
-                name: "Debug notices",
-                desc: "Show a toast at every step of the swipe pipeline to diagnose gesture problems.",
-                control: {
-                    key: "debugMode",
-                    type: "toggle",
-                    defaultValue: DEFAULT_SETTINGS.debugMode,
-                },
-            },
         ];
     }
 
@@ -76,16 +64,9 @@ export class ParagraphSwipeSettingTab extends PluginSettingTab {
 
     /** Keeps the clamping semantics on the declarative path too. */
     public async setControlValue(key: string, value: unknown): Promise<void> {
-        if (key === "swipeThresholdPx") {
-            if (!this.applyThreshold(value)) {
-                return;
-            }
-        } else if (key === "debugMode") {
-            this.plugin.settings.debugMode = value === true;
-        } else {
-            return;
+        if (key === "swipeThresholdPx" && this.applyThreshold(value)) {
+            await this.plugin.saveSettings();
         }
-        await this.plugin.saveSettings();
     }
 
     public display(): void {
@@ -111,18 +92,6 @@ export class ParagraphSwipeSettingTab extends PluginSettingTab {
                     void this.plugin.saveSettings();
                 });
                 return text;
-            });
-
-        new Setting(containerEl)
-            .setName("Debug notices")
-            .setDesc("Show a toast at every step of the swipe pipeline to diagnose gesture problems.")
-            .addToggle((toggle) => {
-                toggle.setValue(this.plugin.settings.debugMode);
-                toggle.onChange((value) => {
-                    this.plugin.settings.debugMode = value;
-                    void this.plugin.saveSettings();
-                });
-                return toggle;
             });
     }
 }
