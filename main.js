@@ -449,14 +449,21 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
       }
     ];
   }
+  /** Shared parser for both renderers: numeric input only, clamped. */
+  applyThreshold(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return false;
+    }
+    this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
+    return true;
+  }
   /** Keeps the clamping semantics on the declarative path too. */
   async setControlValue(key, value) {
     if (key === "swipeThresholdPx") {
-      const parsed = Number(value);
-      if (!Number.isFinite(parsed)) {
+      if (!this.applyThreshold(value)) {
         return;
       }
-      this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
     } else if (key === "debugMode") {
       this.plugin.settings.debugMode = value === true;
     } else {
@@ -477,14 +484,9 @@ var ParagraphSwipeSettingTab = class extends import_obsidian2.PluginSettingTab {
       text.inputEl.max = String(MAX_SWIPE_THRESHOLD_PX);
       text.inputEl.step = "10";
       text.onChange((value) => {
-        if (value.trim().length === 0) {
+        if (value.trim().length === 0 || !this.applyThreshold(value)) {
           return;
         }
-        const parsed = Number(value);
-        if (!Number.isFinite(parsed)) {
-          return;
-        }
-        this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
         void this.plugin.saveSettings();
       });
       return text;
@@ -806,8 +808,7 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     return null;
   }
   onTouchStart(event) {
-    const activeGesture = this.gesture;
-    if (activeGesture !== null && activeGesture.claimed && event.touches.length > 1) {
+    if (this.gesture !== null && this.gesture.claimed && event.touches.length > 1) {
       return;
     }
     this.gesture = null;
@@ -1116,24 +1117,13 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     }
     return { kind: "paragraph", range, line: resolved.position.line, strategy: resolved.strategy };
   }
-  /**
-   * The paragraph this gesture is about: the one the cut effect resolved, or
-   * a fresh lookup for the rare flick that never got far enough to start one.
-   */
-  paragraphOf(gesture) {
-    if (gesture.paragraph !== null) {
-      return { kind: "paragraph", ...gesture.paragraph };
-    }
-    return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-  }
   /** Opens the note picker for the paragraph this gesture started on. */
   triggerSwipe(gesture) {
     const view = gesture.view;
-    const { startX: x, startY: y } = gesture;
-    const lookup = this.paragraphOf(gesture);
+    const lookup = gesture.paragraph !== null ? { kind: "paragraph", ...gesture.paragraph } : this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
     if (lookup.kind === "unresolved") {
       this.debugLog(
-        `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${lookup.detail}`
+        `cannot resolve the editor position at (${Math.round(gesture.startX)}, ${Math.round(gesture.startY)}); ${lookup.detail}`
       );
       return;
     }
@@ -1151,9 +1141,8 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
     this.debugLog(
       `opening the picker for the paragraph on lines ${lookup.range.start + 1}\u2013${lookup.range.end} (via ${lookup.strategy})`
     );
-    const startLine = lookup.range.start;
     const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile) => {
-      void this.moveParagraph(view, startLine, targetFile).catch((error) => {
+      void this.moveParagraph(view, lookup.range.start, targetFile).catch((error) => {
         const message = describeError(error);
         new import_obsidian3.Notice(`Paragraph Swipe: failed to move the paragraph \u2014 ${message}`);
       });
@@ -1194,9 +1183,8 @@ var ParagraphSwipePlugin = class extends import_obsidian3.Plugin {
       this.debugLog("move aborted: the source paragraph changed while the picker was open");
       return;
     }
-    const deletion = getDeletionRange(linesAfter, rangeAfter);
-    const charRange = toCharRange(linesAfter, deletion);
-    editor.replaceRange("", charRange.from, charRange.to);
+    const { from, to } = toCharRange(linesAfter, getDeletionRange(linesAfter, rangeAfter));
+    editor.replaceRange("", from, to);
     new import_obsidian3.Notice(`Paragraph moved to "${targetFile.basename}".`);
   }
 };

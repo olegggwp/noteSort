@@ -64,14 +64,22 @@ export class ParagraphSwipeSettingTab extends PluginSettingTab {
         ];
     }
 
+    /** Shared parser for both renderers: numeric input only, clamped. */
+    private applyThreshold(value: unknown): boolean {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) {
+            return false;
+        }
+        this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
+        return true;
+    }
+
     /** Keeps the clamping semantics on the declarative path too. */
     public async setControlValue(key: string, value: unknown): Promise<void> {
         if (key === "swipeThresholdPx") {
-            const parsed = Number(value);
-            if (!Number.isFinite(parsed)) {
+            if (!this.applyThreshold(value)) {
                 return;
             }
-            this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
         } else if (key === "debugMode") {
             this.plugin.settings.debugMode = value === true;
         } else {
@@ -97,14 +105,9 @@ export class ParagraphSwipeSettingTab extends PluginSettingTab {
                 text.inputEl.max = String(MAX_SWIPE_THRESHOLD_PX);
                 text.inputEl.step = "10";
                 text.onChange((value) => {
-                    if (value.trim().length === 0) {
+                    if (value.trim().length === 0 || !this.applyThreshold(value)) {
                         return;
                     }
-                    const parsed = Number(value);
-                    if (!Number.isFinite(parsed)) {
-                        return;
-                    }
-                    this.plugin.settings.swipeThresholdPx = clampSwipeThreshold(parsed);
                     void this.plugin.saveSettings();
                 });
                 return text;

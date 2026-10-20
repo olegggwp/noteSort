@@ -219,9 +219,9 @@ export default class ParagraphSwipePlugin extends Plugin {
     }
 
     private onTouchStart(event: TouchEvent): void {
-        const activeGesture = this.gesture;
-        if (activeGesture !== null && activeGesture.claimed && event.touches.length > 1) {
-            return; // a stray second finger must not kill an active claimed swipe
+        // A stray second finger must not kill an active claimed swipe.
+        if (this.gesture !== null && this.gesture.claimed && event.touches.length > 1) {
+            return;
         }
         this.gesture = null;
         this.dropCut();
@@ -576,25 +576,18 @@ export default class ParagraphSwipePlugin extends Plugin {
         return { kind: "paragraph", range, line: resolved.position.line, strategy: resolved.strategy };
     }
 
-    /**
-     * The paragraph this gesture is about: the one the cut effect resolved, or
-     * a fresh lookup for the rare flick that never got far enough to start one.
-     */
-    private paragraphOf(gesture: TouchGesture): ParagraphLookup {
-        if (gesture.paragraph !== null) {
-            return { kind: "paragraph", ...gesture.paragraph };
-        }
-        return this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
-    }
-
     /** Opens the note picker for the paragraph this gesture started on. */
     private triggerSwipe(gesture: TouchGesture): void {
         const view = gesture.view;
-        const { startX: x, startY: y } = gesture;
-        const lookup = this.paragraphOf(gesture);
+        // The paragraph the cut effect resolved, or a fresh lookup for the rare
+        // flick that never got far enough to start one.
+        const lookup: ParagraphLookup =
+            gesture.paragraph !== null
+                ? { kind: "paragraph", ...gesture.paragraph }
+                : this.lookupParagraph(gesture.view, gesture.startX, gesture.startY);
         if (lookup.kind === "unresolved") {
             this.debugLog(
-                `cannot resolve the editor position at (${Math.round(x)}, ${Math.round(y)}); ${lookup.detail}`,
+                `cannot resolve the editor position at (${Math.round(gesture.startX)}, ${Math.round(gesture.startY)}); ${lookup.detail}`,
             );
             return;
         }
@@ -612,9 +605,8 @@ export default class ParagraphSwipePlugin extends Plugin {
         this.debugLog(
             `opening the picker for the paragraph on lines ${lookup.range.start + 1}–${lookup.range.end} (via ${lookup.strategy})`,
         );
-        const startLine = lookup.range.start;
         const modal = new NotePickerModal(this.app, sourceFile.path, (targetFile: TFile) => {
-            void this.moveParagraph(view, startLine, targetFile).catch((error: unknown) => {
+            void this.moveParagraph(view, lookup.range.start, targetFile).catch((error: unknown) => {
                 const message = describeError(error);
                 new Notice(`Paragraph Swipe: failed to move the paragraph — ${message}`);
             });
@@ -660,9 +652,8 @@ export default class ParagraphSwipePlugin extends Plugin {
             this.debugLog("move aborted: the source paragraph changed while the picker was open");
             return; // content drifted; do not risk deleting the wrong lines
         }
-        const deletion = getDeletionRange(linesAfter, rangeAfter);
-        const charRange = toCharRange(linesAfter, deletion);
-        editor.replaceRange("", charRange.from, charRange.to);
+        const { from, to } = toCharRange(linesAfter, getDeletionRange(linesAfter, rangeAfter));
+        editor.replaceRange("", from, to);
 
         new Notice(`Paragraph moved to "${targetFile.basename}".`);
     }

@@ -14,17 +14,17 @@ export interface ParagraphRange {
     readonly end: number;
 }
 
-export interface CharPosition {
+interface CharPosition {
     readonly line: number;
     readonly ch: number;
 }
 
-export interface CharRange {
+interface CharRange {
     readonly from: CharPosition;
     readonly to: CharPosition;
 }
 
-export function isBlankLine(line: string): boolean {
+function isBlankLine(line: string): boolean {
     return line.trim().length === 0;
 }
 

@@ -3,7 +3,7 @@
  */
 
 /** Minimal vertical drift (in px) still tolerated inside a claimed swipe. */
-export const MIN_VERTICAL_TOLERANCE_PX = 24;
+const MIN_VERTICAL_TOLERANCE_PX = 24;
 
 /**
  * Total travel (in px) after which the gesture direction is decided:
@@ -15,14 +15,14 @@ export const MIN_VERTICAL_TOLERANCE_PX = 24;
  * lets a touchmove pass through. On a phone screen a swipe of this size is
  * over before the drawer has even started to open.
  */
-export const DECISION_DISTANCE_PX = 10;
+const DECISION_DISTANCE_PX = 10;
 
 /**
  * Width (in px) of the strip along the left edge in which Obsidian's drawer
  * gesture lives. Nothing else uses that strip, so a rightward drag started
  * there can be claimed at once instead of after DECISION_DISTANCE_PX.
  */
-export const DRAWER_EDGE_ZONE_PX = 32;
+const DRAWER_EDGE_ZONE_PX = 32;
 
 export type GestureDecision = "rightward" | "leftward" | "vertical" | "undecided";
 

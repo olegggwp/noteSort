@@ -24,8 +24,7 @@ export function isObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null;
 }
 
-/** Reads a property without assuming it exists in the static typings. */
-export function readProperty(host: object, key: string): unknown {
+function readProperty(host: object, key: string): unknown {
     return (host as unknown as Record<string, unknown>)[key];
 }
 
